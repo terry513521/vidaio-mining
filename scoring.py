@@ -152,14 +152,49 @@ def _lavfi_relative_path(path: str) -> str:
     return rel.replace("\\", "/")
 
 
-def compute_vmaf(
+def _parse_vmaf_json(log_path: str) -> float:
+    data = json.loads(open(log_path, encoding="utf-8").read())
+
+    # Prefer pooled harmonic mean if present; else harmonic-mean the frames ourselves.
+    pooled = data.get("pooled_metrics") or {}
+    for key in ("vmaf", "vmaf_neg", "vmaf_float", "vmaf_float_neg"):
+        if key in pooled and "harmonic_mean" in pooled[key]:
+            return float(pooled[key]["harmonic_mean"])
+        if key in pooled and "mean" in pooled[key]:
+            # fallback if pool option ignored
+            frames = data.get("frames") or []
+            scores = [
+                float(f["metrics"][key])
+                for f in frames
+                if "metrics" in f and key in f["metrics"]
+            ]
+            if scores:
+                return len(scores) / sum(1.0 / max(s, 1e-6) for s in scores)
+            return float(pooled[key]["mean"])
+
+    frames = data.get("frames") or []
+    scores = []
+    for frame in frames:
+        metrics = frame.get("metrics") or {}
+        for key in ("vmaf", "vmaf_neg", "vmaf_float", "vmaf_float_neg"):
+            if key in metrics:
+                scores.append(float(metrics[key]))
+                break
+
+    if not scores:
+        raise RuntimeError(f"No VMAF scores in log: keys={list(data.keys())}")
+
+    return len(scores) / sum(1.0 / max(s, 1e-6) for s in scores)
+
+
+def _compute_vmaf_native(
     reference_path: str,
     distorted_path: str,
     *,
-    ffmpeg_bin: Optional[str] = None,
-    n_subsample: int = 1,
-    n_threads: int = 4,
-    model: str = "version=vmaf_v0.6.1neg",
+    ffmpeg_bin: Optional[str],
+    n_subsample: int,
+    n_threads: int,
+    model: str,
 ) -> float:
     ffmpeg = resolve_binary("ffmpeg", ffmpeg_bin)
 
@@ -196,42 +231,164 @@ def compute_vmaf(
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0 or not os.path.isfile(log_path):
             raise RuntimeError(
-                "VMAF computation failed:\n"
+                "VMAF computation failed (native):\n"
                 + (result.stderr[-2000:] if result.stderr else "no stderr")
             )
+        return _parse_vmaf_json(log_path)
 
-        data = json.loads(open(log_path, encoding="utf-8").read())
 
-    # Prefer pooled harmonic mean if present; else harmonic-mean the frames ourselves.
-    pooled = data.get("pooled_metrics") or {}
-    for key in ("vmaf", "vmaf_neg", "vmaf_float", "vmaf_float_neg"):
-        if key in pooled and "harmonic_mean" in pooled[key]:
-            return float(pooled[key]["harmonic_mean"])
-        if key in pooled and "mean" in pooled[key]:
-            # fallback if pool option ignored
-            frames = data.get("frames") or []
-            scores = [
-                float(f["metrics"][key])
-                for f in frames
-                if "metrics" in f and key in f["metrics"]
+def _default_vmaf_model_path() -> Optional[str]:
+    """Prefer the subnet NEG model file when present on the host."""
+    candidates = [
+        os.environ.get("VMAF_MODEL_PATH", "").strip(),
+        "/root/terry/vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json",
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "vidaio-subnet",
+            "vmaf",
+            "model",
+            "vmaf_v0.6.1neg.json",
+        ),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return None
+
+
+def _libvmaf_model_option(model: str, model_path: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """Return (libvmaf model=... value, host path to mount or None)."""
+    if model_path and os.path.isfile(model_path):
+        return f"path={os.path.abspath(model_path)}", os.path.abspath(model_path)
+    # If caller passed version=neg but image lacks built-ins, fall back to host file.
+    if "neg" in model and "path=" not in model:
+        fallback = _default_vmaf_model_path()
+        if fallback:
+            return f"path={fallback}", fallback
+    return model, None
+
+
+def _compute_vmaf_docker(
+    reference_path: str,
+    distorted_path: str,
+    *,
+    docker_image: str,
+    use_gpus: bool,
+    n_subsample: int,
+    n_threads: int,
+    model: str,
+    model_path: Optional[str] = None,
+) -> float:
+    """Run VMAF inside a Docker image that provides ffmpeg+libvmaf.
+
+    Uses ``--entrypoint ffmpeg`` so both validator images (ENTRYPOINT ffmpeg)
+    and local eval images (python entrypoint) work.
+    """
+    dist_path = os.path.abspath(distorted_path)
+    ref_path = os.path.abspath(reference_path)
+    dist_dir = os.path.dirname(dist_path)
+    ref_dir = os.path.dirname(ref_path)
+    model_opt, mount_model = _libvmaf_model_option(model, model_path)
+
+    with tempfile.TemporaryDirectory(prefix="vmaf_docker_") as tmp:
+        log_path = os.path.join(tmp, "vmaf.json")
+        volumes = {dist_dir, ref_dir, tmp}
+        if mount_model:
+            volumes.add(os.path.dirname(mount_model))
+        vol_args: list[str] = []
+        for vol in sorted(volumes):
+            vol_args.extend(["-v", f"{vol}:{vol}"])
+
+        if use_gpus:
+            filter_graph = (
+                f"[0:v]format=yuv420p,hwupload_cuda[dis];"
+                f"[1:v]format=yuv420p,hwupload_cuda[ref];"
+                f"[dis][ref]libvmaf_cuda="
+                f"n_subsample={n_subsample}:"
+                f"model='{model_opt}':"
+                f"log_fmt=json:"
+                f"log_path={log_path}"
+            )
+        else:
+            filter_graph = (
+                f"[0:v]setpts=PTS-STARTPTS,setsar=1[main];"
+                f"[1:v]setpts=PTS-STARTPTS,setsar=1[ref];"
+                f"[main][ref]libvmaf="
+                f"model={model_opt}:"
+                f"log_fmt=json:"
+                f"log_path={log_path}:"
+                f"pool=harmonic_mean:"
+                f"n_threads={n_threads}:"
+                f"n_subsample={n_subsample}"
+            )
+
+        # Force ffmpeg entrypoint: validator image uses ENTRYPOINT ["ffmpeg"],
+        # while local eval images (e.g. vidaio-compression-eval) may default to python.
+        cmd = ["docker", "run", "--rm", "--entrypoint", "ffmpeg"]
+        if use_gpus:
+            cmd.extend(["--gpus", "all"])
+        cmd.extend(vol_args)
+        cmd.extend(
+            [
+                docker_image,
+                "-hide_banner",
+                "-i",
+                dist_path,
+                "-i",
+                ref_path,
+                "-lavfi",
+                filter_graph,
+                "-f",
+                "null",
+                "-",
             ]
-            if scores:
-                return len(scores) / sum(1.0 / max(s, 1e-6) for s in scores)
-            return float(pooled[key]["mean"])
+        )
 
-    frames = data.get("frames") or []
-    scores = []
-    for frame in frames:
-        metrics = frame.get("metrics") or {}
-        for key in ("vmaf", "vmaf_neg", "vmaf_float", "vmaf_float_neg"):
-            if key in metrics:
-                scores.append(float(metrics[key]))
-                break
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 or not os.path.isfile(log_path):
+            raise RuntimeError(
+                "VMAF computation failed (docker):\n"
+                + (result.stderr[-2000:] if result.stderr else "no stderr")
+                + "\nHint: use an image with libvmaf, e.g.\n"
+                "  --vmaf-docker-image vidaio-compression-eval\n"
+                "and ensure NEG model exists at vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json"
+            )
+        return _parse_vmaf_json(log_path)
 
-    if not scores:
-        raise RuntimeError(f"No VMAF scores in log: keys={list(data.keys())}")
 
-    return len(scores) / sum(1.0 / max(s, 1e-6) for s in scores)
+def compute_vmaf(
+    reference_path: str,
+    distorted_path: str,
+    *,
+    ffmpeg_bin: Optional[str] = None,
+    n_subsample: int = 1,
+    n_threads: int = 4,
+    model: str = "version=vmaf_v0.6.1neg",
+    vmaf_backend: str = "docker",
+    vmaf_docker_image: str = "vidaio-compression-eval",
+    vmaf_docker_gpus: bool = False,
+) -> float:
+    backend = (vmaf_backend or "docker").lower().strip()
+    if backend == "native":
+        return _compute_vmaf_native(
+            reference_path,
+            distorted_path,
+            ffmpeg_bin=ffmpeg_bin,
+            n_subsample=n_subsample,
+            n_threads=n_threads,
+            model=model,
+        )
+    if backend == "docker":
+        return _compute_vmaf_docker(
+            reference_path,
+            distorted_path,
+            docker_image=vmaf_docker_image or "vidaio-compression-eval",
+            use_gpus=bool(vmaf_docker_gpus),
+            n_subsample=n_subsample,
+            n_threads=n_threads,
+            model=model,
+        )
+    raise ValueError(f"Unknown vmaf_backend: {vmaf_backend!r}")
 
 
 @dataclass
@@ -259,6 +416,10 @@ def score_candidate(
     ffprobe_bin: Optional[str] = None,
     vmaf_n_subsample: int = 1,
     vmaf_n_threads: int = 4,
+    vmaf_backend: str = "docker",
+    vmaf_docker_image: str = "vidaio-compression-eval",
+    vmaf_docker_gpus: bool = False,
+    compression_rate_override: Optional[float] = None,
 ) -> ScoreResult:
     validation = validate_hevc_output(distorted_path, ffprobe_bin)
     if not validation.ok:
@@ -273,9 +434,12 @@ def score_candidate(
             validation_errors=validation.errors,
         )
 
-    original_size = os.path.getsize(reference_path)
-    compressed_size = os.path.getsize(distorted_path)
-    compression_rate = compressed_size / max(original_size, 1)
+    if compression_rate_override is not None:
+        compression_rate = float(compression_rate_override)
+    else:
+        original_size = os.path.getsize(reference_path)
+        compressed_size = os.path.getsize(distorted_path)
+        compression_rate = compressed_size / max(original_size, 1)
 
     vmaf = compute_vmaf(
         reference_path,
@@ -283,6 +447,9 @@ def score_candidate(
         ffmpeg_bin=ffmpeg_bin,
         n_subsample=vmaf_n_subsample,
         n_threads=vmaf_n_threads,
+        vmaf_backend=vmaf_backend,
+        vmaf_docker_image=vmaf_docker_image,
+        vmaf_docker_gpus=vmaf_docker_gpus,
     )
 
     s_f, c_comp, q_comp, reason = calculate_compression_score(

@@ -7,7 +7,12 @@ import shutil
 from typing import Optional
 
 
-_FALLBACKS = [
+_LINUX_FALLBACKS = [
+    "/usr/bin",
+    "/usr/local/bin",
+]
+
+_WINDOWS_FALLBACKS = [
     r"C:\ffmpeg\bin",
     r"C:\Program Files\ffmpeg\bin",
 ]
@@ -20,15 +25,19 @@ def _looks_like_exe(path: str) -> bool:
 def resolve_binary(name: str, explicit: Optional[str] = None) -> str:
     if explicit:
         if not _looks_like_exe(explicit):
-            raise FileNotFoundError(f"{name} not found at {explicit}")
-        return explicit
+            # Explicit path missing (e.g. default /usr/bin/ffmpeg not installed):
+            # fall through to PATH / other fallbacks instead of failing immediately.
+            pass
+        else:
+            return explicit
 
     found = shutil.which(name)
     if found:
         return found
 
     exe = f"{name}.exe" if os.name == "nt" else name
-    for folder in _FALLBACKS:
+    folders = _WINDOWS_FALLBACKS if os.name == "nt" else _LINUX_FALLBACKS
+    for folder in folders:
         candidate = os.path.join(folder, exe)
         if _looks_like_exe(candidate):
             return candidate

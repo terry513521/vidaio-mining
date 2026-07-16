@@ -2,6 +2,8 @@
 
 Features only nudge the CRF seed. Segment-aware summary fields preferred:
   cut_rate, hard_fraction, worst_difficulty, volatility
+
+Default strategy: one medium preset + three quality-biased CRF candidates.
 """
 
 from __future__ import annotations
@@ -18,6 +20,15 @@ class HevcRecipe:
     crf_start: int
 
 
+# Default encode recipe: medium is a good speed/quality tradeoff for parallel trials.
+DEFAULT_MEDIUM = HevcRecipe(
+    name="default_medium",
+    preset="medium",
+    params="aq-mode=3:rd=5:ref=4:bframes=6:rc-lookahead=40:keyint=48:min-keyint=1:scenecut=40",
+    crf_start=28,
+)
+
+# Optional slower pack if max_recipes > 1.
 DEFAULT_QUALITY = HevcRecipe(
     name="default_quality",
     preset="slow",
@@ -25,20 +36,13 @@ DEFAULT_QUALITY = HevcRecipe(
     crf_start=28,
 )
 
-DEFAULT_BALANCE = HevcRecipe(
-    name="default_balance",
-    preset="medium",
-    params="aq-mode=3:rd=5:ref=4:bframes=6:rc-lookahead=40:keyint=48:min-keyint=1:scenecut=40",
-    crf_start=28,
-)
-
 
 def crf_seed_for_threshold(vmaf_threshold: int) -> int:
     if vmaf_threshold >= 93:
-        return 24
+        return 14
     if vmaf_threshold >= 89:
-        return 26
-    return 28
+        return 16
+    return 18
 
 
 def adjust_crf_for_volatility(seed: int, features: dict[str, Any]) -> int:
@@ -61,28 +65,84 @@ def adjust_crf_for_volatility(seed: int, features: dict[str, Any]) -> int:
     if texture >= 1.2 or hard_fraction >= 0.5:
         bias -= 1
 
-    return max(18, seed + bias)
+    return max(8, seed + bias)
+
+
+def candidate_crfs(
+    seed: int,
+    crf_min: int,
+    crf_max: int,
+    *,
+    count: int = 3,
+    spread: int = 2,
+) -> list[int]:
+    """Pick ``count`` quality-biased CRFs ending at ``seed``.
+
+    Default for count=3, spread=2: ``[seed-4, seed-2, seed]`` (clamped).
+    If clamping collapses values near the edges, fill with nearest unused CRFs.
+    """
+    if count < 1:
+        raise ValueError("count must be >= 1")
+    if crf_min > crf_max:
+        raise ValueError("crf_min must be <= crf_max")
+
+    center = min(max(int(seed), crf_min), crf_max)
+    spread = max(1, int(spread))
+
+    if count == 1:
+        return [center]
+
+    # Prefer quality (lower CRF). The highest candidate is the feature-biased
+    # seed; the others move toward visually safer encodes.
+    offsets = [-(count - 1 - i) * spread for i in range(count)]
+
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for offset in offsets:
+        crf = min(max(center + offset, crf_min), crf_max)
+        if crf not in seen:
+            seen.add(crf)
+            ordered.append(crf)
+
+    # Fill gaps if clamping removed uniqueness (seed near bounds).
+    step = 1
+    while len(ordered) < count and step <= (crf_max - crf_min + 1):
+        for side in (-step, step):
+            cand = center + side
+            if crf_min <= cand <= crf_max and cand not in seen:
+                seen.add(cand)
+                ordered.append(cand)
+                if len(ordered) >= count:
+                    break
+        step += 1
+
+    return sorted(ordered[:count])
 
 
 def select_recipes(
     features: dict[str, Any],
     vmaf_threshold: int,
-    max_recipes: int = 2,
+    max_recipes: int = 1,
+    preset: str = "medium",
 ) -> list[HevcRecipe]:
     seed = adjust_crf_for_volatility(crf_seed_for_threshold(vmaf_threshold), features)
+    preset = (preset or "medium").lower().strip()
 
     packs = [
         HevcRecipe(
-            name=DEFAULT_QUALITY.name,
-            preset=DEFAULT_QUALITY.preset,
-            params=DEFAULT_QUALITY.params,
+            name=f"default_{preset}",
+            preset=preset,
+            params=DEFAULT_MEDIUM.params,
             crf_start=seed,
         ),
-        HevcRecipe(
-            name=DEFAULT_BALANCE.name,
-            preset=DEFAULT_BALANCE.preset,
-            params=DEFAULT_BALANCE.params,
-            crf_start=min(seed + 1, 40),
-        ),
     ]
+    if max_recipes >= 2:
+        packs.append(
+            HevcRecipe(
+                name=DEFAULT_QUALITY.name,
+                preset=DEFAULT_QUALITY.preset,
+                params=DEFAULT_QUALITY.params,
+                crf_start=seed,
+            )
+        )
     return packs[: max(1, max_recipes)]

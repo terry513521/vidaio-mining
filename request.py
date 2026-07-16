@@ -23,19 +23,34 @@ class CompressionRequest:
 
     # Search / runtime
     time_budget_sec: float = 600.0
-    max_search_steps: int = 8
-    max_recipes: int = 2
-    max_workers: int = 1
+    max_search_steps: int = 8  # VBR step budget; CRF uses crf_candidates
+    max_recipes: int = 1
+    max_workers: int = 3
+    preset: str = "medium"  # libx265 preset: ultrafast..placebo
+    crf_candidates: int = 3
+    crf_spread: int = 2
     vbr_max_ratio_to_target: float = 1.1
     vbr_min_mbps_floor: float = 0.5
-    crf_min: int = 18
+    crf_min: int = 8
     crf_max: int = 40
     crf_start: Optional[int] = None  # optional seed; else recipe default
+
+    # Proxy search (two-phase): sample a few seconds per segment, select CRF on
+    # the proxy, then do one full-file encode for the true s_f.
+    use_proxy: bool = True
+    proxy_seconds_per_segment: float = 2.5
+    proxy_max_seconds: float = 15.0
+    proxy_min_window_seconds: float = 0.5
+    proxy_lossless: bool = True
 
     # Feature / VMAF
     sample_frames: int = 60
     vmaf_n_subsample: int = 1
     vmaf_n_threads: int = 4
+    # Encode uses native ffmpeg_bin; VMAF can use docker (validator-parity) or native.
+    vmaf_backend: str = "docker"  # docker | native
+    vmaf_docker_image: str = "vidaio-compression-eval"
+    vmaf_docker_gpus: bool = False  # True → libvmaf_cuda like subnet validators
 
     work_dir: str = "work"
     keep_candidates: bool = False
@@ -71,6 +86,40 @@ class CompressionRequest:
             raise ValueError("vbr_max_ratio_to_target must be > 0")
         if self.vbr_min_mbps_floor <= 0:
             raise ValueError("vbr_min_mbps_floor must be > 0")
+        if self.crf_candidates < 1:
+            raise ValueError("crf_candidates must be >= 1")
+        if self.crf_spread < 1:
+            raise ValueError("crf_spread must be >= 1")
+        if self.max_workers < 1:
+            raise ValueError("max_workers must be >= 1")
+
+        self.preset = self.preset.lower().strip()
+        allowed_presets = {
+            "ultrafast",
+            "superfast",
+            "veryfast",
+            "faster",
+            "fast",
+            "medium",
+            "slow",
+            "slower",
+            "veryslow",
+            "placebo",
+        }
+        if self.preset not in allowed_presets:
+            raise ValueError(f"preset must be one of {sorted(allowed_presets)}, got {self.preset!r}")
+
+        if self.proxy_seconds_per_segment <= 0:
+            raise ValueError("proxy_seconds_per_segment must be > 0")
+        if self.proxy_max_seconds <= 0:
+            raise ValueError("proxy_max_seconds must be > 0")
+        if self.proxy_min_window_seconds <= 0:
+            raise ValueError("proxy_min_window_seconds must be > 0")
+
+        self.vmaf_backend = self.vmaf_backend.lower().strip()
+        if self.vmaf_backend not in {"docker", "native"}:
+            raise ValueError(f"vmaf_backend must be docker or native, got {self.vmaf_backend!r}")
+        self.vmaf_docker_image = (self.vmaf_docker_image or "vidaio-compression-eval").strip()
 
         self.input_path = str(Path(self.input_path).expanduser())
         self.output_path = str(Path(self.output_path).expanduser())

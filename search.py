@@ -1,21 +1,26 @@
 """CRF / VBR search on the full input (mashup-aware).
 
-CRF search walks quality via VMAF interpolation toward `vmaf_threshold`
-(ab-av1 style), then picks the trial with best Vidaio s_f.
+Default CRF strategy (two-phase):
+  1) Build a short proxy from ~2.5s mid-windows of each segment
+  2) Encode 3 CRF candidates on the proxy in parallel (bitrate-ratio s_f)
+  3) Encode the full file once at the winning CRF for the true s_f
 """
 
 from __future__ import annotations
 
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from encoder import encode_hevc
-from recipes import HevcRecipe, select_recipes
+from logutil import log
+from proxy import build_proxy_reference, select_proxy_windows
+from recipes import HevcRecipe, candidate_crfs, select_recipes
 from request import CompressionRequest
-from scoring import ScoreResult, probe_video, score_candidate
+from scoring import ScoreResult, calculate_compression_score, probe_video, score_candidate
 
 
 @dataclass
@@ -42,6 +47,8 @@ class SearchResult:
     elapsed_sec: float = 0.0
     output_path: Optional[str] = None
     strategy: str = "full_search"
+    proxy_path: Optional[str] = None
+    proxy_windows: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +57,8 @@ class SearchResult:
             "elapsed_sec": self.elapsed_sec,
             "features": self.features,
             "recipes": self.recipes,
+            "proxy_path": self.proxy_path,
+            "proxy_windows": self.proxy_windows,
             "best": None
             if self.best is None
             else {
@@ -128,6 +137,7 @@ def _score(
     req: CompressionRequest,
     *,
     vmaf_n_subsample: Optional[int] = None,
+    compression_rate_override: Optional[float] = None,
 ) -> ScoreResult:
     return score_candidate(
         reference_path,
@@ -137,6 +147,10 @@ def _score(
         ffprobe_bin=req.ffprobe_bin,
         vmaf_n_subsample=vmaf_n_subsample if vmaf_n_subsample is not None else req.vmaf_n_subsample,
         vmaf_n_threads=req.vmaf_n_threads,
+        vmaf_backend=req.vmaf_backend,
+        vmaf_docker_image=req.vmaf_docker_image,
+        vmaf_docker_gpus=req.vmaf_docker_gpus,
+        compression_rate_override=compression_rate_override,
     )
 
 
@@ -153,11 +167,27 @@ def _failed_score(stderr: str) -> ScoreResult:
     )
 
 
+def _is_better_trial(candidate: TrialResult, incumbent: Optional[TrialResult]) -> bool:
+    """Prefer higher s_f; on ties prefer higher VMAF, then lower CRF."""
+    if not candidate.encode_ok:
+        return False
+    if incumbent is None or not incumbent.encode_ok:
+        return True
+    if candidate.score.s_f != incumbent.score.s_f:
+        return candidate.score.s_f > incumbent.score.s_f
+    if candidate.score.vmaf != incumbent.score.vmaf:
+        return candidate.score.vmaf > incumbent.score.vmaf
+    cand_crf = candidate.crf if candidate.crf is not None else 10**9
+    inc_crf = incumbent.crf if incumbent.crf is not None else 10**9
+    return cand_crf < inc_crf
+
+
 def _encode_and_score(
     req: CompressionRequest,
     recipe: HevcRecipe,
     out_path: Path,
     *,
+    input_path: str,
     reference_path: str,
     crf: Optional[int],
     bitrate: Optional[str],
@@ -166,9 +196,10 @@ def _encode_and_score(
     ss: Optional[float] = None,
     t: Optional[float] = None,
     vmaf_n_subsample: Optional[int] = None,
+    compression_rate_override: Optional[float] = None,
 ) -> TrialResult:
     enc = encode_hevc(
-        req.input_path,
+        input_path,
         str(out_path),
         preset=recipe.preset,
         params=recipe.params,
@@ -194,7 +225,13 @@ def _encode_and_score(
             stage=stage,
         )
 
-    score = _score(reference_path, str(out_path), req, vmaf_n_subsample=vmaf_n_subsample)
+    score = _score(
+        reference_path,
+        str(out_path),
+        req,
+        vmaf_n_subsample=vmaf_n_subsample,
+        compression_rate_override=compression_rate_override,
+    )
     return TrialResult(
         recipe=recipe.name,
         mode=req.codec_mode,
@@ -207,34 +244,259 @@ def _encode_and_score(
     )
 
 
-def _vmaf_lerp_crf(
-    target_vmaf: float,
-    worse: TrialResult,
-    better: TrialResult,
-) -> Optional[int]:
-    """Interpolate CRF between a failing (worse/higher CRF) and passing (better/lower CRF) trial.
+def _parallel_crf_trials(
+    req: CompressionRequest,
+    recipe: HevcRecipe,
+    work_dir: Path,
+    deadline: float,
+    trials: list[TrialResult],
+    *,
+    input_path: str,
+    reference_path: str,
+    stage: str,
+    prefix: str,
+    source_bitrate_mbps: Optional[float] = None,
+) -> Optional[TrialResult]:
+    """Encode ``crf_candidates`` in parallel; return max-s_f trial."""
+    start = req.crf_start if req.crf_start is not None else recipe.crf_start
+    candidates = candidate_crfs(
+        start,
+        req.crf_min,
+        req.crf_max,
+        count=max(1, req.crf_candidates),
+        spread=max(1, req.crf_spread),
+    )
+    timeout = _deadline_left(deadline)
+    workers = max(1, min(req.max_workers, len(candidates)))
 
-    Mirrors ab-av1 `vmaf_lerp_q`: estimate the CRF whose VMAF crosses `target_vmaf`.
-    """
-    if worse.crf is None or better.crf is None:
-        return None
-    if not (worse.crf > better.crf):
-        return None
-    if worse.score.vmaf >= better.score.vmaf:
+    log(
+        f"  Parallel CRF ({stage}): recipe={recipe.name} preset={recipe.preset} "
+        f"seed={start} candidates={candidates} workers={workers}"
+    )
+
+    if timeout < 5:
+        log(f"  Skipping {stage} CRF search: time budget exhausted")
         return None
 
-    vmaf_diff = better.score.vmaf - worse.score.vmaf
-    if vmaf_diff <= 1e-6:
-        mid = (better.crf + worse.crf) // 2
-        return mid if better.crf < mid < worse.crf else None
+    def _run_one(crf: int) -> TrialResult:
+        out_path = work_dir / f"{prefix}_{recipe.name}_crf{crf}.mp4"
+        log(f"  → [{stage}] encoding CRF {crf} ...")
 
-    factor = (target_vmaf - worse.score.vmaf) / vmaf_diff
-    lerp = int(round(worse.crf - (worse.crf - better.crf) * factor))
-    lo = better.crf + 1
-    hi = worse.crf - 1
-    if lo > hi:
-        return None
-    return max(lo, min(hi, lerp))
+        trial = _encode_and_score(
+            req,
+            recipe,
+            out_path,
+            input_path=input_path,
+            reference_path=reference_path,
+            crf=crf,
+            bitrate=None,
+            timeout=timeout,
+            stage=stage,
+            vmaf_n_subsample=req.vmaf_n_subsample,
+        )
+
+        if trial.encode_ok and source_bitrate_mbps is not None and stage == "proxy":
+            measured = _measured_bitrate_mbps(str(out_path), req.ffprobe_bin)
+            trial.measured_bitrate_mbps = measured
+            if measured is not None and source_bitrate_mbps > 0:
+                rate_override = measured / source_bitrate_mbps
+                s_f, c_comp, q_comp, reason = calculate_compression_score(
+                    vmaf_score=trial.score.vmaf,
+                    compression_rate=rate_override,
+                    vmaf_threshold=float(req.vmaf_threshold),
+                )
+                trial.score = ScoreResult(
+                    s_f=s_f,
+                    vmaf=trial.score.vmaf,
+                    compression_rate=rate_override,
+                    compression_ratio=1.0 / max(rate_override, 1e-9),
+                    compression_component=c_comp,
+                    quality_component=q_comp,
+                    reason=f"proxy_bitrate_ratio:{reason}",
+                    validation_errors=[],
+                )
+
+        if trial.encode_ok:
+            log(
+                f"  ← [{stage}] CRF {crf}: vmaf={trial.score.vmaf:.2f} "
+                f"s_f={trial.score.s_f:.4f} rate={trial.score.compression_rate:.3f}"
+            )
+        else:
+            log(f"  ← [{stage}] CRF {crf}: encode failed")
+        return trial
+
+    local_best: Optional[TrialResult] = None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_run_one, crf): crf for crf in candidates}
+        for fut in as_completed(futures):
+            crf = futures[fut]
+            try:
+                trial = fut.result()
+            except Exception as exc:
+                out_path = work_dir / f"{prefix}_{recipe.name}_crf{crf}.mp4"
+                trial = TrialResult(
+                    recipe=recipe.name,
+                    mode=req.codec_mode,
+                    crf=crf,
+                    bitrate=None,
+                    path=str(out_path),
+                    score=_failed_score(str(exc)),
+                    encode_ok=False,
+                    encode_error=str(exc),
+                    stage=stage,
+                )
+                log(f"  ← [{stage}] CRF {crf}: exception {exc}")
+            trials.append(trial)
+            if _is_better_trial(trial, local_best):
+                local_best = trial
+
+    return local_best
+
+
+def search_crf_two_phase(
+    req: CompressionRequest,
+    recipe: HevcRecipe,
+    work_dir: Path,
+    deadline: float,
+    trials: list[TrialResult],
+    *,
+    segments: list[dict[str, Any]],
+) -> tuple[Optional[TrialResult], Optional[str], list[dict[str, Any]]]:
+    """Proxy CRF selection → one full-file encode at the winning CRF."""
+    windows = select_proxy_windows(
+        segments,
+        seconds_per_segment=req.proxy_seconds_per_segment,
+        max_seconds=req.proxy_max_seconds,
+        min_window_seconds=req.proxy_min_window_seconds,
+    )
+    proxy_meta = [
+        {
+            "segment_index": w.segment_index,
+            "start_sec": w.start_sec,
+            "duration_sec": w.duration_sec,
+            "difficulty": w.difficulty,
+        }
+        for w in windows
+    ]
+
+    if not windows:
+        log("  Proxy: no windows — falling back to full-file parallel CRF")
+        best = _parallel_crf_trials(
+            req,
+            recipe,
+            work_dir,
+            deadline,
+            trials,
+            input_path=req.input_path,
+            reference_path=req.input_path,
+            stage="full",
+            prefix="full",
+        )
+        return best, None, []
+
+    proxy_path = work_dir / "proxy_reference.mp4"
+    log(
+        f"  Building proxy: {len(windows)} window(s), "
+        f"~{sum(w.duration_sec for w in windows):.1f}s "
+        f"(target {req.proxy_seconds_per_segment}s/seg, cap {req.proxy_max_seconds}s)"
+    )
+    built = build_proxy_reference(
+        req.input_path,
+        str(proxy_path),
+        windows,
+        ffmpeg_bin=req.ffmpeg_bin,
+        timeout=_deadline_left(deadline),
+    )
+    if not built.ok:
+        log(f"  Proxy build failed: {built.error[:300]} — falling back to full-file")
+        best = _parallel_crf_trials(
+            req,
+            recipe,
+            work_dir,
+            deadline,
+            trials,
+            input_path=req.input_path,
+            reference_path=req.input_path,
+            stage="full",
+            prefix="full",
+        )
+        return best, None, proxy_meta
+
+    log(f"  Proxy ready: {built.path} ({built.total_seconds:.1f}s)")
+
+    source_bitrate = _measured_bitrate_mbps(req.input_path, req.ffprobe_bin)
+    if source_bitrate is None:
+        log("  Warning: could not probe source bitrate; proxy s_f uses file-size rate")
+
+    proxy_best = _parallel_crf_trials(
+        req,
+        recipe,
+        work_dir,
+        deadline,
+        trials,
+        input_path=built.path,
+        reference_path=built.path,
+        stage="proxy",
+        prefix="proxy",
+        source_bitrate_mbps=source_bitrate,
+    )
+
+    if proxy_best is None or proxy_best.crf is None:
+        log("  Proxy search found no winner — falling back to full-file")
+        best = _parallel_crf_trials(
+            req,
+            recipe,
+            work_dir,
+            deadline,
+            trials,
+            input_path=req.input_path,
+            reference_path=req.input_path,
+            stage="full",
+            prefix="full",
+        )
+        return best, built.path, proxy_meta
+
+    chosen_crf = proxy_best.crf
+    log(
+        f"  Proxy best CRF={chosen_crf} "
+        f"vmaf={proxy_best.score.vmaf:.2f} s_f={proxy_best.score.s_f:.4f} "
+        f"→ one full-file encode"
+    )
+    if proxy_best.score.vmaf < req.vmaf_threshold:
+        log(
+            f"  Warning: proxy VMAF {proxy_best.score.vmaf:.2f} < "
+            f"threshold {req.vmaf_threshold}; full encode may still fail"
+        )
+
+    if _deadline_left(deadline) < 5:
+        log("  Skipping final encode: time budget exhausted")
+        return proxy_best, built.path, proxy_meta
+
+    out_path = work_dir / f"final_{recipe.name}_crf{chosen_crf}.mp4"
+    log(f"  → [final] encoding CRF {chosen_crf} ...")
+    final_best = _encode_and_score(
+        req,
+        recipe,
+        out_path,
+        input_path=req.input_path,
+        reference_path=req.input_path,
+        crf=chosen_crf,
+        bitrate=None,
+        timeout=_deadline_left(deadline),
+        stage="final",
+        vmaf_n_subsample=req.vmaf_n_subsample,
+    )
+    trials.append(final_best)
+    if final_best.encode_ok:
+        log(
+            f"  ← [final] CRF {chosen_crf}: vmaf={final_best.score.vmaf:.2f} "
+            f"s_f={final_best.score.s_f:.4f} rate={final_best.score.compression_rate:.3f}"
+        )
+    else:
+        log(f"  ← [final] CRF {chosen_crf}: encode failed")
+
+    return final_best if final_best.encode_ok else proxy_best, built.path, proxy_meta
 
 
 def search_crf_on_source(
@@ -251,170 +513,18 @@ def search_crf_on_source(
     vmaf_n_subsample: int,
     prefix: str,
 ) -> Optional[TrialResult]:
-    """VMAF-interpolated CRF walk toward threshold; keep max s_f.
-
-    1) Seed from recipe / request CRF
-    2) Walk CRF by lerping VMAF toward `vmaf_threshold` (not by lerping s_f)
-    3) Among all successful trials, return the one with highest s_f
-    4) Local ±1 CRF polish around that winner
-    """
-
-    crf_lo = req.crf_min
-    crf_hi = req.crf_max
-    start = req.crf_start if req.crf_start is not None else recipe.crf_start
-    start = min(max(int(start), crf_lo), crf_hi)
-    step_budget = max(1, req.max_search_steps)
-    threshold = float(req.vmaf_threshold)
-
-    by_crf: dict[int, TrialResult] = {}
-    local_best: Optional[TrialResult] = None
-    run = 0
-
-    def consider(crf: int) -> Optional[TrialResult]:
-        nonlocal local_best
-        crf = int(crf)
-        if crf < req.crf_min or crf > req.crf_max:
-            return None
-        if crf in by_crf:
-            return by_crf[crf]
-        if _deadline_left(deadline) < 5:
-            return None
-
-        out_path = work_dir / f"{prefix}_{recipe.name}_crf{crf}.mp4"
-        trial = _encode_and_score(
-            req,
-            recipe,
-            out_path,
-            reference_path=reference_path,
-            crf=crf,
-            bitrate=None,
-            timeout=_deadline_left(deadline),
-            stage=stage,
-            ss=ss,
-            t=t,
-            vmaf_n_subsample=vmaf_n_subsample,
-        )
-        by_crf[crf] = trial
-        trials.append(trial)
-
-        if trial.encode_ok and (
-            local_best is None or trial.score.s_f > local_best.score.s_f
-        ):
-            local_best = trial
-        return trial
-
-    def ok_trials() -> list[TrialResult]:
-        return [t for t in by_crf.values() if t.encode_ok and t.crf is not None]
-
-    def passing() -> list[TrialResult]:
-        return [t for t in ok_trials() if t.score.vmaf >= threshold]
-
-    def failing() -> list[TrialResult]:
-        return [t for t in ok_trials() if t.score.vmaf < threshold]
-
-    def next_crf(last: TrialResult) -> Optional[int]:
-        """Choose next CRF using VMAF lerp / edge jumps (ab-av1-inspired)."""
-        assert last.crf is not None
-        seen = set(by_crf)
-
-        if last.score.vmaf >= threshold:
-            # Quality OK → push worse quality (higher CRF) toward the cliff
-            upper = min(
-                (t for t in failing() if t.crf is not None and t.crf > last.crf),
-                key=lambda t: t.crf or 0,
-                default=None,
-            )
-            if upper is not None and upper.crf is not None:
-                if upper.crf == last.crf + 1:
-                    return None
-                cand = _vmaf_lerp_crf(threshold, worse=upper, better=last)
-                if cand is not None and cand not in seen:
-                    return cand
-            if last.crf >= crf_hi:
-                return None
-            # First-iter cut toward high CRF (like ab-av1 40/60)
-            if run == 1 and last.crf + 1 < crf_hi:
-                cand = int(round(last.crf * 0.4 + crf_hi * 0.6))
-            else:
-                cand = last.crf + max(1, (crf_hi - last.crf + 1) // 2)
-            cand = min(max(cand, last.crf + 1), crf_hi)
-            return cand if cand not in seen else (
-                last.crf + 1 if last.crf + 1 <= crf_hi and last.crf + 1 not in seen else None
-            )
-
-        # Quality too low → push better quality (lower CRF)
-        lower = max(
-            (t for t in passing() if t.crf is not None and t.crf < last.crf),
-            key=lambda t: t.crf or 0,
-            default=None,
-        )
-        if lower is not None and lower.crf is not None:
-            if lower.crf + 1 == last.crf:
-                return None
-            cand = _vmaf_lerp_crf(threshold, worse=last, better=lower)
-            if cand is not None and cand not in seen:
-                return cand
-        if last.crf <= crf_lo:
-            return None
-        if run == 1 and last.crf > crf_lo + 1:
-            cand = int(round(last.crf * 0.4 + crf_lo * 0.6))
-        else:
-            cand = last.crf - max(1, (last.crf - crf_lo + 1) // 2)
-        cand = max(min(cand, last.crf - 1), crf_lo)
-        return cand if cand not in seen else (
-            last.crf - 1 if last.crf - 1 >= crf_lo and last.crf - 1 not in seen else None
-        )
-
-    last = consider(start)
-    run = 1
-
-    while (
-        last is not None
-        and last.encode_ok
-        and last.crf is not None
-        and len(by_crf) < step_budget
-        and _deadline_left(deadline) > 5
-    ):
-        cand = next_crf(last)
-        if cand is None:
-            break
-        trial = consider(cand)
-        run += 1
-        if trial is None or not trial.encode_ok:
-            break
-        last = trial
-
-        # Near-threshold stop: still keep walking a bit for s_f, but if we sit
-        # just above threshold with no room between pass/fail, local polish next.
-        pass_list = passing()
-        fail_list = failing()
-        if pass_list and fail_list:
-            best_pass = max(pass_list, key=lambda t: t.crf or 0)
-            worst_fail = min(fail_list, key=lambda t: t.crf or 0)
-            if (
-                best_pass.crf is not None
-                and worst_fail.crf is not None
-                and worst_fail.crf <= best_pass.crf + 1
-            ):
-                break
-
-    # Local ±1 around s_f winner (and around threshold-edge passer)
-    polish: set[int] = set()
-    if local_best is not None and local_best.crf is not None:
-        polish.update({local_best.crf - 1, local_best.crf + 1})
-    pass_list = passing()
-    if pass_list:
-        edge = max(pass_list, key=lambda t: t.crf or 0)
-        if edge.crf is not None:
-            polish.update({edge.crf - 1, edge.crf + 1})
-    for crf in sorted(polish):
-        if len(by_crf) >= step_budget + 2:
-            break
-        if _deadline_left(deadline) < 5:
-            break
-        consider(crf)
-
-    return local_best
+    """Legacy full-file parallel CRF (used when proxy is disabled)."""
+    return _parallel_crf_trials(
+        req,
+        recipe,
+        work_dir,
+        deadline,
+        trials,
+        input_path=req.input_path,
+        reference_path=reference_path,
+        stage=stage,
+        prefix=prefix,
+    )
 
 
 def search_vbr_on_source(
@@ -455,6 +565,7 @@ def search_vbr_on_source(
             req,
             recipe,
             out_path,
+            input_path=req.input_path,
             reference_path=reference_path,
             crf=None,
             bitrate=bitrate,
@@ -475,7 +586,7 @@ def search_vbr_on_source(
                 trial.score.reason = (
                     f"bitrate_missing (requested {bitrate}, cap {cap_mbps:.3f} Mbps)"
                 )
-                print(f"  Reject VBR trial {bitrate}: measured bitrate missing")
+                log(f"  Reject VBR trial {bitrate}: measured bitrate missing")
                 hi = min(hi, max(req.vbr_min_mbps_floor, mbps - 0.05))
             elif measured_mbps > cap_mbps:
                 trial.rejected_reason = "bitrate_above_cap"
@@ -485,27 +596,25 @@ def search_vbr_on_source(
                     f"cap {cap_mbps:.3f} Mbps = {req.vbr_max_ratio_to_target:.2f}x "
                     f"target {target_mbps:.3f})"
                 )
-                print(
+                log(
                     f"  Reject VBR trial {bitrate}: "
                     f"measured {measured_mbps:.3f} Mbps > cap {cap_mbps:.3f} Mbps"
                 )
                 hi = min(hi, max(req.vbr_min_mbps_floor, mbps - 0.05))
             elif trial.score.vmaf < req.vmaf_threshold:
                 trial.rejected_reason = "vmaf_below_threshold"
-                print(
+                log(
                     f"  Reject VBR trial {bitrate}: "
                     f"VMAF {trial.score.vmaf:.2f} < threshold {req.vmaf_threshold}"
                 )
                 lo = min(cap_mbps, mbps + 0.05)
             else:
-                # Valid under cap + VMAF threshold — keep best s_f
                 if local_best is None or trial.score.s_f > local_best.score.s_f:
                     local_best = trial
                 hi = min(hi, max(req.vbr_min_mbps_floor, mbps - 0.05))
 
         trials.append(trial)
 
-    # Seed probes
     consider(min(target_mbps, cap_mbps))
     consider(0.9 * min(target_mbps, cap_mbps))
 
@@ -522,24 +631,51 @@ def search_vbr_on_source(
     return local_best
 
 
-def run_search(req: CompressionRequest, features: dict[str, float]) -> SearchResult:
+def run_search(
+    req: CompressionRequest,
+    features: dict[str, float],
+    segments: Optional[list[dict[str, Any]]] = None,
+) -> SearchResult:
     started = time.time()
     deadline = started + req.time_budget_sec
 
     work_dir = Path(req.work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    recipes = select_recipes(features, req.vmaf_threshold, max_recipes=req.max_recipes)
+    recipes = select_recipes(
+        features,
+        req.vmaf_threshold,
+        max_recipes=req.max_recipes,
+        preset=req.preset,
+    )
     trials: list[TrialResult] = []
-    strategy = "full_search" if req.codec_mode == "CRF" else "vbr_search"
     final_best: Optional[TrialResult] = None
+    proxy_path: Optional[str] = None
+    proxy_windows: list[dict[str, Any]] = []
 
-    print(f"  Full-file {req.codec_mode} search ({len(recipes)} recipe(s))")
+    use_proxy = bool(req.use_proxy and req.codec_mode == "CRF" and segments)
+    strategy = "proxy_then_full" if use_proxy else (
+        "parallel_crf" if req.codec_mode == "CRF" else "vbr_search"
+    )
+
+    log(
+        f"  {strategy} search "
+        f"({len(recipes)} recipe(s), workers={req.max_workers})"
+    )
 
     for recipe in recipes:
         if _deadline_left(deadline) < 5:
             break
-        if req.codec_mode == "CRF":
+        if req.codec_mode == "CRF" and use_proxy:
+            best_for_recipe, proxy_path, proxy_windows = search_crf_two_phase(
+                req,
+                recipe,
+                work_dir,
+                deadline,
+                trials,
+                segments=segments or [],
+            )
+        elif req.codec_mode == "CRF":
             best_for_recipe = search_crf_on_source(
                 req,
                 recipe,
@@ -599,4 +735,6 @@ def run_search(req: CompressionRequest, features: dict[str, float]) -> SearchRes
         elapsed_sec=time.time() - started,
         output_path=output_path,
         strategy=strategy,
+        proxy_path=proxy_path,
+        proxy_windows=proxy_windows,
     )
