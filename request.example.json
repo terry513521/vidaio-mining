@@ -1,0 +1,23 @@
+{
+  "input_path": "./4k.mp4",
+  "output_path": "compressed_hevc.mp4",
+  "vmaf_threshold": 89,
+  "codec": "hevc",
+  "codec_mode": "CRF",
+  "target_bitrate": null,
+  "time_budget_sec": 3000,
+  "max_search_steps": 5,
+  "max_recipes": 2,
+  "vbr_max_ratio_to_target": 1.1,
+  "vbr_min_mbps_floor": 0.5,
+  "crf_min": 22,
+  "crf_max": 36,
+  "crf_start": null,
+  "sample_frames": 40,
+  "vmaf_n_subsample": 1,
+  "vmaf_n_threads": 2,
+  "work_dir": "work",
+  "keep_candidates": true,
+  "ffmpeg_bin": "C:\\ffmpeg\\bin\\ffmpeg.exe",
+  "ffprobe_bin": "C:\\ffmpeg\\bin\\ffprobe.exe"
+}
