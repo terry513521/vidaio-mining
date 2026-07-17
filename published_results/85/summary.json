@@ -1,8 +1,8 @@
 {
   "threshold": 85,
-  "generated_at": "2026-07-17T21:30:06.357867+00:00",
-  "job_count": 12,
-  "ok_count": 12,
+  "generated_at": "2026-07-17T21:31:07.955853+00:00",
+  "job_count": 14,
+  "ok_count": 14,
   "entries": [
     {
       "job_id": "v1",
@@ -38,6 +38,24 @@
       "s_f": 0.5802786117455752,
       "vmaf": 85.032544,
       "compression_rate": 0.08041747952578163,
+      "error": null
+    },
+    {
+      "job_id": "v14",
+      "crf": 31,
+      "libx265_params": "aq-mode=2:aq-strength=0.8:rd=5:ref=3:bframes=6:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50",
+      "s_f": 0.5710256768486175,
+      "vmaf": 85.848236,
+      "compression_rate": 0.08330056763724934,
+      "error": null
+    },
+    {
+      "job_id": "v15",
+      "crf": 30,
+      "libx265_params": "aq-mode=2:aq-strength=0.8:rd=6:ref=4:bframes=7:rc-lookahead=70:keyint=60:min-keyint=1:scenecut=60",
+      "s_f": 0.4636815145684377,
+      "vmaf": 86.040437,
+      "compression_rate": 0.11564418699158713,
       "error": null
     },
     {
