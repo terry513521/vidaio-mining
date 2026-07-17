@@ -2,6 +2,7 @@ job_id,crf,s_f,vmaf,compression_rate,error,libx265_params
 v1,32,0.7148332796497648,85.944528,0.060209415905467994,,"aq-mode=1:aq-strength=0.8:rd=4:ref=6:bframes=8:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
 v10,27,0.38007088068090156,85.339865,0.15960311536718405,,"aq-mode=1:aq-strength=0.8:rd=4:ref=5:bframes=8:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50"
 v11,31,0.6301893559937389,85.509168,0.07171587995760198,,"aq-mode=1:aq-strength=0.8:rd=5:ref=5:bframes=8:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
+v13,31,0.5802786117455752,85.032544,0.08041747952578163,,"aq-mode=1:aq-strength=0.8:rd=5:ref=6:bframes=8:rc-lookahead=40:keyint=60:min-keyint=1:scenecut=50"
 v2,29,0.45701718345923636,85.341274,0.11684134425541799,,"aq-mode=1:aq-strength=0.8:rd=5:ref=5:bframes=6:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50"
 v3,30,0.4817488651860813,85.386791,0.10746724095602192,,"aq-mode=1:aq-strength=0.8:rd=4:ref=5:bframes=8:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50"
 v4,30,0.5451443905186857,85.355364,0.08869609661510623,,"aq-mode=1:aq-strength=0.8:rd=4:ref=6:bframes=8:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
