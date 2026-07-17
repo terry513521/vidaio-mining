@@ -5,5 +5,6 @@ v3,30,0.4817488651860813,85.386791,0.10746724095602192,,"aq-mode=1:aq-strength=0
 v4,30,0.5451443905186857,85.355364,0.08869609661510623,,"aq-mode=1:aq-strength=0.8:rd=4:ref=6:bframes=8:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
 v5,28,0.4080890412065166,86.450094,0.14462679011236287,,"aq-mode=1:aq-strength=0.8:rd=6:ref=4:bframes=6:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=60"
 v6,29,0.565652438757606,85.070509,0.0835654097613812,,"aq-mode=1:aq-strength=0.8:rd=3:ref=2:bframes=8:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50"
+v7,29,0.3722411111470091,85.056379,0.1644330195262668,,"aq-mode=1:aq-strength=0.9:rd=5:ref=4:bframes=8:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
 v8,31,0.4775421674773093,86.103277,0.11038623768505802,,"aq-mode=2:aq-strength=0.8:rd=6:ref=5:bframes=8:rc-lookahead=20:keyint=60:min-keyint=1:scenecut=50"
 v9,32,0.5818085575046742,85.357057,0.08046018683798074,,"aq-mode=2:aq-strength=0.8:rd=5:ref=6:bframes=6:rc-lookahead=30:keyint=60:min-keyint=1:scenecut=50"
