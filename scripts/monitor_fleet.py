@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Monitor a fleet SLA run and publish JSON results to GitHub when done.
+"""Monitor a fleet SLA run; commit+push JSON results whenever they change.
 
 Examples:
-  # Watch until done, then commit+push published_results/ if anything new
+  # Watch, and on each new best.json commit+push published_results/
   python scripts/monitor_fleet.py --watch
 
   # Watch without publishing
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -78,6 +77,26 @@ def _count_results(threshold: int) -> tuple[int, int, int]:
     return len(best), len(results), ok
 
 
+def _results_fingerprint(threshold: int) -> tuple[int, float]:
+    """(ok_count, newest_mtime) — changes when new/updated best.json appear."""
+    root = ROOT / "work_fleet" / str(threshold)
+    if not root.is_dir():
+        return 0, 0.0
+    ok = 0
+    newest = 0.0
+    for path in root.glob("*/best.json"):
+        try:
+            st = path.stat()
+            newest = max(newest, float(st.st_mtime))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if payload.get("error") or payload.get("crf") is None:
+            continue
+        ok += 1
+    return ok, newest
+
+
 def _tail_lines(path: Path, n: int = 12) -> list[str]:
     if not path.is_file():
         return []
@@ -105,6 +124,7 @@ def print_status(
         "running_pids": pids,
         "done": (not pids) and ok_n >= expected and expected > 0,
         "log": str(log_path) if log_path else None,
+        "fingerprint": _results_fingerprint(thr),
     }
     print(
         f"[fleet] thr={thr} ok={ok_n}/{expected} "
@@ -117,6 +137,17 @@ def print_status(
         for line in _tail_lines(log_path, 8):
             print(f"  {line}")
     return status
+
+
+def _publish(threshold: int) -> int:
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "publish_results.py"),
+        "--threshold",
+        str(threshold),
+    ]
+    print(f"[fleet] publishing (commit+push if changes): {' '.join(cmd)}")
+    return subprocess.call(cmd, cwd=str(ROOT))
 
 
 def watch(
@@ -134,20 +165,29 @@ def watch(
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
+    last_fp: tuple[int, float] | None = None
     print(
         f"[fleet] watching every {interval_sec:.0f}s "
-        f"(Ctrl+C to stop monitor; batch keeps running)"
+        f"(publish on change={'on' if publish else 'off'}; "
+        f"Ctrl+C stops monitor only)"
     )
     while not stop["flag"]:
         status = print_status(request_path=request_path, log_path=log_path)
+        fp = status["fingerprint"]
+        if publish and fp != last_fp and fp[0] > 0:
+            print(f"[fleet] results changed ({last_fp} → {fp}) — syncing to GitHub")
+            code = _publish(threshold=status["threshold"])
+            if code != 0:
+                print(f"[fleet] publish failed (exit {code}); will retry next change")
+            else:
+                last_fp = fp
         print("-" * 60)
         if status["done"]:
             print("[fleet] all jobs finished")
             if publish:
+                # Final sync in case last write raced the fingerprint check.
                 return _publish(threshold=status["threshold"])
             return 0
-        # If process died early with incomplete results, keep watching a bit
-        # but report; user can decide.
         if not status["running_pids"] and status["ok_best"] < status["expected_jobs"]:
             print(
                 "[fleet] main_batch not running and results incomplete — "
@@ -155,17 +195,6 @@ def watch(
             )
         time.sleep(max(1.0, interval_sec))
     return 130
-
-
-def _publish(threshold: int) -> int:
-    cmd = [
-        sys.executable,
-        str(ROOT / "scripts" / "publish_results.py"),
-        "--threshold",
-        str(threshold),
-    ]
-    print(f"[fleet] publishing (commit+push if changes): {' '.join(cmd)}")
-    return subprocess.call(cmd, cwd=str(ROOT))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -183,7 +212,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--publish",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="After watch completes, publish JSON results (commit+push if changes; default: true)",
+        help="On each new/changed best.json, commit+push published_results/ (default: true)",
     )
     return p.parse_args(argv)
 

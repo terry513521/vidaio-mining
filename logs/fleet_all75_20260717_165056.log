@@ -1,3 +1,79 @@
 [2026-07-17 16:50:56] Fleet SLA (local): 75 video(s), batch_size=5, run_id=8a055ac34496, db=work_fleet/results.db
 [2026-07-17 16:50:56] Fleet SLA (local): jobs=75 workers=5 waves=15 gpu_slots=1 deadline_per_wave=1500s final_reserve=300s probe_min=900s score_reserve=40s upload_reserve=0s
 [2026-07-17 16:50:56]   wave 1/15: jobs=['v1', 'v2', 'v3', 'v4', 'v5'] gpu=['v1'] cpu=['v2', 'v3', 'v4', 'v5'] probe_window=1200s
+[2026-07-17 16:51:24]   [v1] full-file CRF search: dual VMAF, preset=fast, target VMAF 85, max size 80%, CRF 22..42, seed=30 (crf_start=30)
+[2026-07-17 16:51:24]   [v4] full-file CRF search: dual VMAF, preset=fast, target VMAF 85, max size 80%, CRF 22..42, seed=30 (crf_start=30)
+[2026-07-17 16:51:24]   [v2] full-file CRF search: dual VMAF, preset=fast, target VMAF 85, max size 80%, CRF 22..42, seed=30 (crf_start=30)
+[2026-07-17 16:51:24]   [v3] full-file CRF search: dual VMAF, preset=fast, target VMAF 85, max size 80%, CRF 22..42, seed=30 (crf_start=30)
+[2026-07-17 16:51:25]   [v5] full-file CRF search: dual VMAF, preset=fast, target VMAF 85, max size 80%, CRF 22..42, seed=30 (crf_start=30)
+[2026-07-17 16:51:39]   [v1] probe CRF30 … 15s size=0.3MiB rate=0.0019 ratio=538.39x
+[2026-07-17 16:51:39]   [v4] probe CRF30 … 15s size=0.8MiB rate=0.0052 ratio=192.66x
+[2026-07-17 16:51:39]   [v2] probe CRF30 … 15s size=0.3MiB rate=0.0021 ratio=477.12x
+[2026-07-17 16:51:39]   [v3] probe CRF30 … 15s size=1.0MiB rate=0.0085 ratio=117.47x
+[2026-07-17 16:51:40]   [v5] probe CRF30 … 15s size=0.5MiB rate=0.0043 ratio=230.83x
+[2026-07-17 16:51:54]   [v1] probe CRF30 … 30s size=1.5MiB rate=0.0111 ratio=89.74x
+[2026-07-17 16:51:54]   [v4] probe CRF30 … 30s size=1.5MiB rate=0.0104 ratio=96.33x
+[2026-07-17 16:51:54]   [v2] probe CRF30 … 30s size=1.5MiB rate=0.0126 ratio=79.53x
+[2026-07-17 16:51:54]   [v3] probe CRF30 … 30s size=2.3MiB rate=0.0192 ratio=52.21x
+[2026-07-17 16:51:55]   [v5] probe CRF30 … 30s size=1.5MiB rate=0.0130 ratio=76.95x
+[2026-07-17 16:52:09]   [v1] probe CRF30 … 45s size=2.3MiB rate=0.0167 ratio=59.83x
+[2026-07-17 16:52:09]   [v4] probe CRF30 … 45s size=2.8MiB rate=0.0190 ratio=52.55x
+[2026-07-17 16:52:09]   [v2] probe CRF30 … 45s size=2.8MiB rate=0.0231 ratio=43.38x
+[2026-07-17 16:52:10]   [v3] probe CRF30 … 45s size=3.0MiB rate=0.0255 ratio=39.16x
+[2026-07-17 16:52:10]   [v5] probe CRF30 … 45s size=2.0MiB rate=0.0173 ratio=57.71x
+[2026-07-17 16:52:24]   [v1] probe CRF30 … 60s size=3.3MiB rate=0.0241 ratio=41.42x
+[2026-07-17 16:52:24]   [v4] probe CRF30 … 60s size=3.3MiB rate=0.0225 ratio=44.46x
+[2026-07-17 16:52:25]   [v2] probe CRF30 … 60s size=4.0MiB rate=0.0335 ratio=29.82x
+[2026-07-17 16:52:25]   [v3] probe CRF30 … 60s size=4.0MiB rate=0.0340 ratio=29.37x
+[2026-07-17 16:52:25]   [v5] probe CRF30 … 60s size=3.3MiB rate=0.0282 ratio=35.51x
+[2026-07-17 16:52:39]   [v1] probe CRF30 … 75s size=4.5MiB rate=0.0334 ratio=29.92x
+[2026-07-17 16:52:39]   [v4] probe CRF30 … 75s size=4.3MiB rate=0.0294 ratio=34.00x
+[2026-07-17 16:52:40]   [v2] probe CRF30 … 75s size=5.5MiB rate=0.0461 ratio=21.69x
+[2026-07-17 16:52:40]   [v3] probe CRF30 … 75s size=5.0MiB rate=0.0426 ratio=23.50x
+[2026-07-17 16:52:40]   [v5] probe CRF30 … 75s size=4.5MiB rate=0.0390 ratio=25.65x
+[2026-07-17 16:52:54]   [v1] probe CRF30 … 90s size=5.5MiB rate=0.0409 ratio=24.48x
+[2026-07-17 16:52:54]   [v4] probe CRF30 … 90s size=5.8MiB rate=0.0398 ratio=25.13x
+[2026-07-17 16:52:55]   [v2] probe CRF30 … 90s size=6.3MiB rate=0.0524 ratio=19.09x
+[2026-07-17 16:52:55]   [v3] probe CRF30 … 90s size=5.8MiB rate=0.0489 ratio=20.43x
+[2026-07-17 16:52:55]   [v5] probe CRF30 … 90s size=5.5MiB rate=0.0477 ratio=20.99x
+[2026-07-17 16:53:09]   [v1] probe CRF30 … 105s size=6.0MiB rate=0.0446 ratio=22.44x
+[2026-07-17 16:53:09]   [v4] probe CRF30 … 105s size=7.3MiB rate=0.0502 ratio=19.93x
+[2026-07-17 16:53:10]   [v2] probe CRF30 … 105s size=7.3MiB rate=0.0608 ratio=16.46x
+[2026-07-17 16:53:10]   [v3] probe CRF30 … 105s size=7.3MiB rate=0.0617 ratio=16.20x
+[2026-07-17 16:53:10]   [v5] probe CRF30 … 105s size=6.0MiB rate=0.0520 ratio=19.24x
+[2026-07-17 16:53:24]   [v1] probe CRF30 … 120s size=6.5MiB rate=0.0483 ratio=20.71x
+[2026-07-17 16:53:24]   [v4] probe CRF30 … 120s size=8.0MiB rate=0.0554 ratio=18.06x
+[2026-07-17 16:53:25]   [v2] probe CRF30 … 120s size=7.5MiB rate=0.0629 ratio=15.91x
+[2026-07-17 16:53:25]   [v3] probe CRF30 … 120s size=8.3MiB rate=0.0702 ratio=14.24x
+[2026-07-17 16:53:25]   [v5] probe CRF30 … 120s size=6.5MiB rate=0.0563 ratio=17.76x
+[2026-07-17 16:53:39]   [v1] probe CRF30 … 135s size=7.0MiB rate=0.0520 ratio=19.23x
+[2026-07-17 16:53:39]   [v4] probe CRF30 … 135s size=8.5MiB rate=0.0588 ratio=17.00x
+[2026-07-17 16:53:40]   [v3] probe CRF30 … 135s size=9.0MiB rate=0.0766 ratio=13.05x
+[2026-07-17 16:53:40]   [v2] probe CRF30 … 135s size=8.0MiB rate=0.0671 ratio=14.91x
+[2026-07-17 16:53:40]   [v5] probe CRF30 … 135s size=7.0MiB rate=0.0606 ratio=16.49x
+[2026-07-17 16:53:54]   [v1] probe CRF30 … 150s size=7.8MiB rate=0.0576 ratio=17.37x
+[2026-07-17 16:53:54]   [v4] probe CRF30 … 150s size=9.5MiB rate=0.0657 ratio=15.21x
+[2026-07-17 16:53:55]   [v2] probe CRF30 … 150s size=8.5MiB rate=0.0712 ratio=14.04x
+[2026-07-17 16:53:55]   [v3] probe CRF30 … 150s size=10.0MiB rate=0.0851 ratio=11.75x
+[2026-07-17 16:53:55]   [v5] probe CRF30 … 150s size=7.8MiB rate=0.0671 ratio=14.89x
+[2026-07-17 16:54:09]   [v1] probe CRF30 … 165s size=8.8MiB rate=0.0650 ratio=15.39x
+[2026-07-17 16:54:09]   [v4] probe CRF30 … 165s size=10.0MiB rate=0.0692 ratio=14.45x
+[2026-07-17 16:54:10]   [v2] probe CRF30 … 165s size=9.8MiB rate=0.0817 ratio=12.24x
+[2026-07-17 16:54:10]   [v3] probe CRF30 … 165s size=11.0MiB rate=0.0936 ratio=10.68x
+[2026-07-17 16:54:10]   [v5] probe CRF30 … 165s size=8.8MiB rate=0.0758 ratio=13.19x
+[2026-07-17 16:54:24]   [v1] probe CRF30 … 180s size=10.3MiB rate=0.0761 ratio=13.13x
+[2026-07-17 16:54:24]   [v4] probe CRF30 … 180s size=10.8MiB rate=0.0744 ratio=13.44x
+[2026-07-17 16:54:25]   [v2] probe CRF30 … 180s size=11.0MiB rate=0.0922 ratio=10.85x
+[2026-07-17 16:54:25]   [v3] probe CRF30 … 180s size=12.0MiB rate=0.1021 ratio=9.79x
+[2026-07-17 16:54:25]   [v5] probe CRF30 … 180s size=10.0MiB rate=0.0866 ratio=11.54x
+[2026-07-17 16:54:39]   [v1] probe CRF30 … 195s size=11.5MiB rate=0.0854 ratio=11.71x
+[2026-07-17 16:54:40]   [v4] probe CRF30 … 195s size=11.8MiB rate=0.0813 ratio=12.30x
+[2026-07-17 16:54:40]   [v2] probe CRF30 … 195s size=11.8MiB rate=0.0985 ratio=10.15x
+[2026-07-17 16:54:40]   [v3] probe CRF30 … 195s size=12.8MiB rate=0.1085 ratio=9.21x
+[2026-07-17 16:54:40]   [v5] probe CRF30 … 195s size=11.3MiB rate=0.0975 ratio=10.26x
+[2026-07-17 16:54:53]   [v1] probe CRF30 encode done 209.3s size=12.1MiB rate=0.0900 ratio=11.11x
+[2026-07-17 16:54:55]   [v4] probe CRF30 … 210s size=13.0MiB rate=0.0900 ratio=11.12x
+[2026-07-17 16:54:55]   [v2] probe CRF30 … 210s size=12.3MiB rate=0.1027 ratio=9.74x
+[2026-07-17 16:54:55]   [v3] probe CRF30 … 210s size=14.0MiB rate=0.1192 ratio=8.39x
+[2026-07-17 16:54:55]   [v5] probe CRF30 … 210s size=12.8MiB rate=0.1105 ratio=9.05x
+[2026-07-17 16:54:58]   [v3] probe CRF30 encode done 213.4s size=14.3MiB rate=0.1213 ratio=8.24x
