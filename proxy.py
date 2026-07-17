@@ -9,6 +9,7 @@ bitrate ratio against the full source.
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -121,6 +122,7 @@ def build_proxy_reference(
     *,
     ffmpeg_bin: Optional[str] = None,
     timeout: Optional[float] = None,
+    deadline: Optional[float] = None,
 ) -> ProxyBuildResult:
     """Lossless yuv420p concat of the selected windows (VMAF-safe reference)."""
     if not windows:
@@ -139,6 +141,15 @@ def build_proxy_reference(
     work.mkdir(parents=True, exist_ok=True)
 
     part_paths: list[Path] = []
+
+    def command_timeout() -> Optional[float]:
+        if deadline is None:
+            return timeout
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired("proxy", 0)
+        return min(timeout, left) if timeout is not None else left
+
     try:
         for i, win in enumerate(windows):
             part = work / f"part_{i:03d}.mp4"
@@ -167,7 +178,9 @@ def build_proxy_reference(
                 "+faststart",
                 str(part),
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=command_timeout()
+            )
             if result.returncode != 0 or not part.is_file():
                 return ProxyBuildResult(
                     ok=False,
@@ -200,7 +213,9 @@ def build_proxy_reference(
             "+faststart",
             str(out),
         ]
-        result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            concat_cmd, capture_output=True, text=True, timeout=command_timeout()
+        )
         if result.returncode != 0 or not out.is_file():
             return ProxyBuildResult(
                 ok=False,

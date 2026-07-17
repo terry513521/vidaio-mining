@@ -1,0 +1,321 @@
+
+--- PAGE 1 ---
+Hacking VMAF and VMAF NEG: vulnerability to
+different preprocessing methods
+Abstract—Video-quality measurement plays a critical role in
+the development of video-processing applications. In this paper,
+we show how video preprocessing can artiﬁcially increase the
+popular quality metric VMAF and its tuning-resistant version,
+VMAF NEG. We propose a pipeline that tunes processing-
+algorithm parameters to increase VMAF by up to 218.8%.
+A subjective comparison revealed that for most preprocessing
+methods, a video’s visual quality drops or stays unchanged. We
+also show that some preprocessing methods can increase VMAF
+NEG scores by up to 23.6%.
+Index Terms —video quality, VMAF, quality improvement,
+codec tuning, objective full-reference metric, video-quality mea-
+surement, video-codec comparisons
+I. I NTRODUCTION
+Video-quality measurement is critical to the development of
+video-processing algorithms such as compression, video en-
+hancement, adaptive network streaming, and super-resolution.
+Despite the existence of objective quality metrics, visual
+quality is often a primary means of testing new algorithms.
+Perceptual quality is measurable through subjective evaluation,
+yielding the most-accurate results, but because subjective
+evaluation is complex and time consuming, it is unsuitable
+for frequent use; objective quality metrics are more applicable
+in practice. Yet to ensure precision, not just speed, metrics
+must correlate highly with perceptual results. Today, a popular
+and widespread full-reference metric is the Video Multi-
+method Fusion Approach (VMAF), developed by Netﬂix in
+cooperation with the University of Southern California. VMAF
+is machine-learning based and combines multiple elementary
+video features (VIF [1], DLM [2] at different scales, and
+various TI measures) with the machine-learning-based Sup-
+port Vector Regression technique. The regressor is trained
+using mean-opinion-score (MOS) data to approximate its per-
+frame values. VMAF has become popular thanks to its high
+correlation with subjective quality, as proven by independent
+researchers [3]. Since the ﬁrst release, its developers have
+published two sets of versions: original models (0.6.1, 0.6.2,
+0.6.3, and their variations) and a special “no-enhancement
+gain” (NEG) model for comparing video encoders. A NEG
+model emerged because video preprocessing can artiﬁcially
+increase VMAF; this characteristic makes the original metric
+vulnerable, and algorithm developers can exploit it to achieve
+higher values. Our work’s aim is to show that VMAF can
+be increased both with or without a change in visual quality.
+We also demonstrate that VMAF NEG is susceptible to
+preprocessing and can be artiﬁcially increased as well. We
+propose transformations that considerably increase VMAF and
+VMAF NEG, in addition to providing results from a subjective
+evaluation in which the perceptual quality of VMAF-tuned
+preprocessed videos either declines or stays unchanged.
+II. R ELATED WORK
+Tuning for objective metrics is used throughout the industry
+to achieve better scores in video comparisons. It may, however,
+decrease the subjective quality, just as tuning for subjective
+metrics may decrease objective quality. The authors of [4]
+analyzed the effect of video preprocessing on visual quality
+and compared it with objective metrics. In their experiments,
+subjective quality improved when the Gaussian-blurring PSNR
+decreased. The results showed that a no-reference metric,
+NIQE, correlated better with subjective scores for prepro-
+cessed videos. But NIQE can also be inconsistent. In other
+research [5], the authors demonstrated that NIQE has issues
+when estimating the quality of dark and highly textured
+frames. Many video-processing algorithms implement tuning
+ﬁlters, which are especially popular for video encoders. For
+example, x264 and x265 provide tuning options for PSNR
+and SSIM, and recently, the developers of libaom implemented
+VMAF tuning [6]. In their paper, they showed that preprocess-
+ing enabled a substantial compression gain (the bitrate fell by
+37.91% for the same VMAF), while rate-distortion optimiza-
+tion enabled a much smaller gain (4.69%). The authors of
+“Hacking VMAF with Video Color and Contrast Distortion”
+[7] observed that histogram equalization and unsharp masking
+can artiﬁcially increase VMAF by 5–6%, and other researchers
+also proved VMAF’s vulnerability to preprocessing [8]. To
+separate preprocessing enhancement from pure compression
+loss, Netﬂix introduced a new metric model called VMAF No
+Enhancement Gain (NEG) [9]. It recommends using the NEG
+mode to evaluate codecs and the “default” mode to concur-
+rently assess compression and enhancement. No independent
+researchers have yet published an analysis of VMAF NEG.
+III. P ROPOSED METHOD
+Fig. 1 depicts our pipeline for studying how various trans-
+forms affect VMAF. We transformed the input video using
+various preprocessing methods, then calculated the VMAF
+score between the preprocessed and original (“ground truth”,
+or GT) video sequences. Next we compared the resulting
+VMAF score with the VMAF measured between two GT
+videos (as it can differ from 100 for two instances of the
+same video, the value is usually around 100 [10]). If the
+resulting VMAF score was lower than the score for videos
+without preprocessing, an original video was kept and zero
+arXiv:2107.04510v2  [cs.MM]  16 Aug 2021
+--- PAGE 2 ---
+gain was accounted in statistics. We tested several preprocess-
+ing methods: tone-mapping algorithms (Drago’s tone-mapping
+method [11], Mantiuk’s tone-mapping method [12], Retinex,
+and Reinhard’s tone-mapping method [13]), contrast-limited
+adaptive histogram equalization (CLAHE), histogram equal-
+ization, contrast-based transformations (gamma correction,
+three-degree polynomial contrast transformation, and linear
+contrast transformation), and unsharp masking. Our testing
+included a combination of gamma correction and unsharp
+masking, as well as a CLAHE tuned for VMAF NEG to
+increase the VMAF value. In addition to the methods above,
+we applied stochastic gradient descent to approximate con-
+volution weights. (We slightly increased the value of each
+cell, calculating the resulting VMAF value each time. Then
+we found gradient-vector-approximation decomposition for
+VMAF on each kernel weight using an approximate right-
+derivative formula.) To ensure the approaches we considered
+were suitable for real-world data, we constructed a data
+set containing professional camera footage, user-generated
+sequences, and computer-generated imagery. The total number
+of videos was 618. Since VMAF models are designed for
+FullHD resolution, all videos were FullHD. We calculated the
+VMAF score for the entire video as the mean of all per-frame
+VMAF values. Accordingly, varying the video lengths did not
+affect VMAF judgment, so we used only the ﬁrst 10 frames
+to ﬁnd the best preprocessing method. Most of the methods
+we tested had several parameters, and each parameter raised
+exponentially the computational complexity of an optimal-
+combination search. To reduce the number of tested parameters
+and accelerate convergence, our approach used the (µ + λ)
+genetic algorithm [14]. Fig. 2 shows the methods that yielded
+the highest gain values (e.g., the best tone-mapping method
+and best trained convolution).
+The results showed that CLAHE yielded the best VMAF
+increase. The third quartile (top and bottom lines of the boxes
+in Fig. 2) was an 86.8% gain, and the median was 50.2%;
+the highest gain was 218.8%. In most cases where the VMAF
+score increased considerably (more than 50%), the subjective
+quality decreased. Examples of this trend appear in Fig. 3. The
+VMAF score increased even when applying simple histogram
+equalization without tunable parameters—in particular, the
+third-quartile gain was 37.9%.
+Fig. 1. Proposed tuning pipeline without compression.
+Fig. 2. VMAF gain for different preprocessing methods. For examples with
+negative gain no preprocessing was applied, so they have a zero gain for
+statistics.
+IV. R ESULTS VERIFICATION ON ENCODED STREAMS
+VMAF is widely used in codec comparisons as a main
+objective estimate of video quality—for example, in [15]. To
+ensure our proposed approach is applicable in this ﬁeld, we
+changed the main comparison pipeline by adding a video-
+compression step before calculating VMAF, as Fig. 4 shows.
+Our approach therefore calculated VMAF twice: once for the
+compressed GT video, then once for the compressed and pre-
+processed video. The plot below shows the difference between
+corresponding VMAF scores (compressed and compressed
+with preprocessing). We used x265 to compress the videos at
+the following bitrates: 2, 4, 6, 8, and 10 Mbps. We increased all
+video durations to 300 frames to allow codec stabilization. The
+results for several videos from the data set appear in Fig. 5 and
+Fig. 6. For each one, the VMAF gain stayed the same relative
+to the tuned but uncompressed video. The VMAF generally
+increased more at high bitrates.
+A. Subjective evaluation
+To analyze how video preprocessing (which increases
+VMAF scores) affects perceptual quality, we conducted a
+subjective comparison. We chose six representative videos
+that differ in spatial and temporal complexity as well as in
+brightness. The crowdsourced Subjectify.us service allowed
+us to receive an assessment from 114 participants. These
+participants were to look at pairs of images processed using
+different methods and then choose from each pair the image
+with the best subjective quality. V otes from those who failed
+to correctly answer the veriﬁcation questions (which exhibited
+obvious quality differences) were excluded. The total number
+of responses was 1,584.
+The comparison included six versions of preprocessed
+videos: GT (original), gamma correction and unsharp masking
+combined, Drago’s tone-mapping method, CLAHE, gamma,
+and unsharp masking. In a direct comparison, GT proved to be
+better than the preprocessed video in 58.3% of cases, meaning
+--- PAGE 3 ---
+Fig. 3. Comparison of frames from original videos (top) and videos preprocessed using the CLAHE method (bottom). VMAF increased by 181.22% for the
+video at left, by 147.30% for the one in the middle video, and by 114.75% for the one at right.
+Fig. 4. Tuning pipeline with compression.
+Fig. 5. VMAF gain at different bitrates. We tuned the ﬁrst 10 frames of each
+video, then used x265 to compress the full 300 frames. Gains are generally
+higher at high bitrates.
+they were for the most part visually indistinguishable. In all the
+videos, however, VMAF rose artiﬁcially by a mean of 46%.
+The combination of gamma correction and unsharp masking
+provided the worst visual quality. The highest subjective-
+evaluation values went to Drago’s tone-mapping algorithm.
+Fig. 7 shows the results of the comparison.
+Table I provides the values of VMAF gain by tested pre-
+processing methods. Drago’s tone-mapping method provided
+similar gain on average compared to unsharp masking and
+gamma+unsharp masking and much better visual quality.
+TABLE I
+VMAF INCREASES BY TUNED PREPROCESSING METHOD
+Preprocessing method
+Video
+name
+Gamma correction
+and
+Unsharp masking
+combination
+Drago’s tone
+mapping method CLAHE Unsharp
+masking
+Along 11.39 19.69 41.62 7.92
+Beach 18.41 16.02 34.27 18.4
+Body 5.6 20.84 45.83 5.6
+Building 64.9 28.13 52.83 65.03
+Castle 22.17 24.21 42.63 22.22
+Ocean 85.22 107.09 191.3 85.22
+Avg. 34.62 37.00 68.08 34.07
+B. VMAF NEG analysis
+To explore the impact of the above-described transforma-
+tions on VMAF NEG, we used the pipeline from Fig. 4
+and replaced VMAF with VMAF NEG. The combination of
+gamma correction and unsharp masking yielded the greatest
+increase in VMAF NEG: 23.6%. The gain exceeded 5% in 15
+out of 22 videos (Fig. 8), meaning video preprocessing still
+affects the NEG version. Fig. 9 shows the other methods
+that yielded the high gain values. However, visual quality
+of VMAF NEG-tunned preprocessed videos is better, that of
+VMAF-tunned preprocessing. Fig. 10 shows the examples of
+frames with and without preprocessing.
+V. C ONCLUSION
+In this paper we described our investigation of methods for
+increasing VMAF and VMAF NEG. Among the preprocessing
+methods we tested, CLAHE showed the highest gain for
+VMAF: 63.17%. Unsharp masking combined with gamma
+correction increased VMAF NEG by 5.93% on average.
+--- PAGE 4 ---
+Fig. 6. Rate-distortion curves for original- and preprocessed-video compression. Each dashed line is for the GT video, and the solid line is for the preprocessed
+video. The VMAF increase due to preprocessing is generally higher at high bitrates.
+Fig. 7. Subjective-evaluation results. The ranks came from a Bradley-Terry
+model for pairwise comparisons.
+Subjective evaluation showed that preprocessed videos with
+greater VMAF mostly have the same or worse visual quality.
+The best visual quality came by applying tone mapping to
+the original video.
+Absent subjective evaluation, VMAF and VMAF NEG
+should not be the only video-quality measure in a benchmark,
+because basic video-processing methods can increase them.
+We demonstrated that these methods can boost the VMAF
+value considerably despite reducing or leaving unchanged
+the visual quality. Developers of video-processing and
+Fig. 8. VMAF NEG gain for different videos. The preprocessing method was
+gamma correction plus unsharp masking.
+compression algorithms can implement in a codec certain
+tuning methods that may either have no effect or cause
+visual-quality loss. In addition, video preprocessing can
+artiﬁcially increase VMAF NEG, a valuable metric when
+comparing codecs, by up to 23.6%.
+Measuring subjective quality in video comparisons may
+--- PAGE 5 ---
+Fig. 9. VMAF NEG gain for different preprocessing methods. For examples
+with negative gain no preprocessing was applied, so they have a zero gain for
+statistics.
+also provide controversial results, however. In our tests, tone
+mapping applied to the original video ranked higher in a
+visual comparison. Because viewers tend to choose the most
+visually appealing image, objective full-reference metrics are
+also necessary to check picture similarity with reference. Thus,
+fairer and more-reliable comparisons require a combination of
+different analysis methods and professional benchmarks.
+ACKNOWLEDGMENT
+This work was partially supported by the Russian Founda-
+tion for Basic Research under Grant 19-01-00785a and by the
+“Intellect” noncommercial fund for science and educational
+development.
+REFERENCES
+[1] H. R. Sheikh and A. C. Bovik, “Image information and visual quality,”
+in IEEE Transactions on Image Processing , 2006, vol. 15, no. 2, pp.
+430-444.
+[2] S. Li, F. Zhang, L. Ma, and K. N. Ngan, “Image quality assessment by
+separately evaluating detail losses and additive impairments,” in IEEE
+Transactions on Multimedia , 2011, pp. 935-949.
+[3] R. Rassool, “VMAF reproducibility: Validating a perceptual practical
+video quality metric,” in IEEE International Symposium on Broadband
+Multimedia Systems and Broadcasting (BMSB) , 2017, pp. 1-2.
+[4] J. Chilukamari, S. Kannangara and G. Maxwell, “Investigation of the
+effectiveness of video quality metrics in video pre-processing,” in IEEE
+Third International Conference on Consumer Electronics Berlin (ICCE-
+Berlin), 2013, pp. 1-5.
+[5] A. Zvezdakova, D. Kulikov, D. Kondranin, and D. Vatolin, “Barriers
+Towards No-reference Metrics Application to Compressed Video Quality
+Analysis: on the Example of No-reference Metric NIQE,” in CEUR
+Workshop Proceedings, 2019, pp. 22-27.
+[6] S. Deng, J. Han and Y . Xu, “VMAF Based Rate-Distortion Optimization
+for Video Coding,” inIEEE 22nd International Workshop on Multimedia
+Signal Processing (MMSP) , 2020, pp. 1-6.
+[7] A. Zvezdakova, S. Zvezdakov, D. Kulikov, and D. Vatolin, “Hacking
+VMAF with Video Color and Contrast Distortion,” in CEUR Workshop
+Proceedings, 2019, pp. 53-57.
+[8] J. Ozer, “VMAF is Hackable: What Now?”. Available: https://
+streaminglearningcenter.com/blogs/vmaf-is-hackable-what-now.html.
+[9] Toward a Better Quality Metric for the Video Community, Netﬂix
+Technology Blog. Available: https://netﬂixtechblog.com/toward-a-better-
+quality-metric-for-the-video-community-7ed94e752a30.
+[10] VMAF GitHub. Frequently Asked Questions. Available: https://github.
+com/Netﬂix/vmaf/blob/master/FAQ.md.
+[11] F. Drago, K. Myszkowski, T. Annen, and N. Chiba, “Adaptive logarith-
+mic mapping for displaying high contrast scenes,” in Comput. Graph.
+F orum, 2003, vol. 22, no. 3, pp. 419–426.
+[12] R. Mantiuk, K. Myszkowski, and H. P. Seidel, “A perceptual framework
+for contrast processing of high dynamic range images,” in ACM Trans.
+Appl. Perception, 2006, vol. 3, no. 3, pp. 286–308.
+[13] E. Reinhard, M. Stark, P. Shirley, and J. Ferwerda, “Photographic tone
+reproduction for digital images,” in ACM Trans. Graph. , 2002, vol. 21,
+no. 3, pp. 267-276.
+[14] H.-G. Beyer and H.-P. Schwefel, “Evolution strategies - A comprehen-
+sive introduction,” in Natural Computing , 2002, pp. 3-52.
+[15] A. Zvezdakova, D. Kulikov, S. Zvezdakov, and D. Vatolin, “BSQ-rate: a
+new approach for video-codec performance comparison and drawbacks
+of current solutions,” in Programming and computer software , 2020, pp.
+183-194.
+--- PAGE 6 ---
+Fig. 10. Examples of frames with different preprocessing methods, tunned for VMAF NEG increase. Metric gain is calculated as a difference between VMAF
+NEG score for preprocessed and compressed video, and only compressed video.

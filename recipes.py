@@ -1,6 +1,7 @@
 """HEVC recipe priors for mashup-style challenges.
 
-Features only nudge the CRF seed. Segment-aware summary fields preferred:
+Features nudge the CRF seed and (when enabled) set non-CRF ``-x265-params``.
+Segment-aware summary fields preferred:
   cut_rate, hard_fraction, worst_difficulty, volatility
 
 Default strategy: one medium preset + three quality-biased CRF candidates.
@@ -9,7 +10,7 @@ Default strategy: one medium preset + three quality-biased CRF candidates.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -119,20 +120,53 @@ def candidate_crfs(
     return sorted(ordered[:count])
 
 
+def _feature_x265_params_string(
+    features: Optional[dict[str, Any]],
+    *,
+    quality_pack: bool = False,
+) -> tuple[str, list[str]]:
+    """Build ``-x265-params`` from features (no CRF). Falls back to defaults."""
+    from interp_search import format_x265_params, propose_feature_x265_params
+
+    if not features:
+        base = DEFAULT_QUALITY.params if quality_pack else DEFAULT_MEDIUM.params
+        return base, ["no features — static default params"]
+    params, reasons = propose_feature_x265_params(
+        features, quality_pack=quality_pack
+    )
+    return format_x265_params(params), reasons
+
+
 def select_recipes(
     features: dict[str, Any],
     vmaf_threshold: int,
     max_recipes: int = 1,
     preset: str = "medium",
+    *,
+    feature_baseline: bool = True,
+    params_override: Optional[str] = None,
 ) -> list[HevcRecipe]:
+    from interp_search import merge_x265_params
+
     seed = adjust_crf_for_volatility(crf_seed_for_threshold(vmaf_threshold), features)
     preset = (preset or "medium").lower().strip()
+
+    if feature_baseline:
+        primary_params, _ = _feature_x265_params_string(features, quality_pack=False)
+        quality_params, _ = _feature_x265_params_string(features, quality_pack=True)
+    else:
+        primary_params = DEFAULT_MEDIUM.params
+        quality_params = DEFAULT_QUALITY.params
+
+    if params_override:
+        primary_params = merge_x265_params(primary_params, params_override)
+        quality_params = merge_x265_params(quality_params, params_override)
 
     packs = [
         HevcRecipe(
             name=f"default_{preset}",
             preset=preset,
-            params=DEFAULT_MEDIUM.params,
+            params=primary_params,
             crf_start=seed,
         ),
     ]
@@ -141,8 +175,20 @@ def select_recipes(
             HevcRecipe(
                 name=DEFAULT_QUALITY.name,
                 preset=DEFAULT_QUALITY.preset,
-                params=DEFAULT_QUALITY.params,
+                params=quality_params,
                 crf_start=seed,
             )
         )
     return packs[: max(1, max_recipes)]
+
+
+def describe_feature_x265_baseline(
+    features: Optional[dict[str, Any]],
+    *,
+    quality_pack: bool = False,
+) -> list[str]:
+    """Human-readable feature → x265-params lines for logging."""
+    params_str, reasons = _feature_x265_params_string(
+        features, quality_pack=quality_pack
+    )
+    return reasons + [f"x265-params={params_str}"]

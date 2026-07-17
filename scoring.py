@@ -7,10 +7,19 @@ import math
 import os
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from encode_mode import is_abr_mode
 from ffmpeg_tools import resolve_binary
+
+FRAME_TOLERANCE = 5
+FPS_TOLERANCE = 0.3
+MAX_VMAF_MODEL_DELTA = 3.0
+NEG_MODEL = "version=vmaf_v0.6.1neg"
+BASE_MODEL = "version=vmaf_v0.6.1"
 
 
 def calculate_compression_score(
@@ -83,7 +92,11 @@ class EncodeValidation:
     probe: dict[str, Any]
 
 
-def probe_video(path: str, ffprobe_bin: Optional[str] = None) -> dict[str, Any]:
+def probe_video(
+    path: str,
+    ffprobe_bin: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
     ffprobe = resolve_binary("ffprobe", ffprobe_bin)
     cmd = [
         ffprobe,
@@ -95,16 +108,20 @@ def probe_video(path: str, ffprobe_bin: Optional[str] = None) -> dict[str, Any]:
         "-show_format",
         path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed for {path}: {result.stderr}")
     return json.loads(result.stdout)
 
 
-def validate_hevc_output(path: str, ffprobe_bin: Optional[str] = None) -> EncodeValidation:
+def validate_hevc_output(
+    path: str,
+    ffprobe_bin: Optional[str] = None,
+    timeout: Optional[float] = None,
+) -> EncodeValidation:
     errors: list[str] = []
     try:
-        probe = probe_video(path, ffprobe_bin)
+        probe = probe_video(path, ffprobe_bin, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
         return EncodeValidation(False, [str(exc)], {})
 
@@ -131,6 +148,154 @@ def validate_hevc_output(path: str, ffprobe_bin: Optional[str] = None) -> Encode
         errors.append(f"container should be mp4, got {fmt_name}")
 
     return EncodeValidation(ok=len(errors) == 0, errors=errors, probe=probe)
+
+
+def _parse_fps(value: str | None) -> float:
+    try:
+        numerator, denominator = (value or "0/1").split("/")
+        denominator_f = float(denominator)
+        return float(numerator) / denominator_f if denominator_f else 0.0
+    except (AttributeError, TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def _frame_count(
+    path: str,
+    video: dict[str, Any],
+    ffprobe_bin: Optional[str],
+    timeout: Optional[float] = None,
+) -> int:
+    try:
+        count = int(video.get("nb_frames") or 0)
+        if count > 0:
+            return count
+    except (TypeError, ValueError):
+        pass
+
+    ffprobe = resolve_binary("ffprobe", ffprobe_bin)
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=nb_read_frames",
+            "-of",
+            "default=nokey=1:noprint_wrappers=1",
+            path,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=min(120.0, timeout) if timeout is not None else 120.0,
+    )
+    try:
+        return int(result.stdout.strip())
+    except (TypeError, ValueError):
+        return 0
+
+
+def _video_info(
+    path: str,
+    ffprobe_bin: Optional[str],
+    timeout: Optional[float] = None,
+) -> dict[str, Any]:
+    probe = probe_video(path, ffprobe_bin, timeout=timeout)
+    video = next(
+        (stream for stream in probe.get("streams", []) if stream.get("codec_type") == "video"),
+        None,
+    )
+    if video is None:
+        raise RuntimeError(f"No video stream in {path}")
+    fmt = probe.get("format") or {}
+    bit_rate = video.get("bit_rate") or fmt.get("bit_rate")
+    try:
+        bit_rate_mbps = float(bit_rate) / 1_000_000.0 if bit_rate else None
+    except (TypeError, ValueError):
+        bit_rate_mbps = None
+    return {
+        "codec": (video.get("codec_name") or "").lower(),
+        "profile": video.get("profile") or "",
+        "sar": video.get("sample_aspect_ratio") or "1:1",
+        "pix_fmt": video.get("pix_fmt") or "",
+        "width": int(video.get("width") or 0),
+        "height": int(video.get("height") or 0),
+        "fps": _parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate")),
+        "frames": _frame_count(path, video, ffprobe_bin, timeout=timeout),
+        "container": fmt.get("format_name") or "",
+        "color_space": video.get("color_space"),
+        "color_primaries": video.get("color_primaries"),
+        "color_transfer": video.get("color_transfer"),
+        "bit_rate_mbps": bit_rate_mbps,
+        "probe": probe,
+    }
+
+
+def validate_validator_gates(
+    reference_path: str,
+    distorted_path: str,
+    *,
+    ffprobe_bin: Optional[str] = None,
+    codec_mode: str = "RC",
+    target_bitrate_mbps: Optional[float] = None,
+    timeout: Optional[float] = None,
+) -> EncodeValidation:
+    """Mirror the compression validator's HEVC encoding hard gates."""
+    errors: list[str] = []
+    try:
+        ref = _video_info(reference_path, ffprobe_bin, timeout=timeout)
+        dist = _video_info(distorted_path, ffprobe_bin, timeout=timeout)
+    except Exception as exc:
+        return EncodeValidation(False, [str(exc)], {})
+
+    if dist["codec"] not in {"hevc", "h265"}:
+        errors.append(f"codec must be hevc, got {dist['codec']}")
+    if dist["width"] != ref["width"] or dist["height"] != ref["height"]:
+        errors.append(
+            f"resolution must be {ref['width']}x{ref['height']}, "
+            f"got {dist['width']}x{dist['height']}"
+        )
+    if abs(dist["fps"] - ref["fps"]) > FPS_TOLERANCE:
+        errors.append(f"fps must be ~{ref['fps']:.3f}, got {dist['fps']:.3f}")
+    if abs(dist["frames"] - ref["frames"]) > FRAME_TOLERANCE:
+        errors.append(
+            f"frame count {dist['frames']} vs ref {ref['frames']} "
+            f"(tolerance {FRAME_TOLERANCE})"
+        )
+    if "ivf" in dist["container"].lower() or not (
+        "mp4" in dist["container"].lower() or "mov" in dist["container"].lower()
+    ):
+        errors.append(f"container must be MP4, got {dist['container']}")
+    if dist["profile"] not in {"Main", "Main 10"}:
+        errors.append(f"HEVC profile must be Main/Main 10, got {dist['profile']}")
+    if dist["sar"] not in {"1:1", "1/1"}:
+        errors.append(f"SAR must be 1:1, got {dist['sar']}")
+    if dist["pix_fmt"] != "yuv420p":
+        errors.append(f"pix_fmt must be yuv420p, got {dist['pix_fmt']}")
+
+    for key in ("color_space", "color_primaries", "color_transfer"):
+        ref_value = ref.get(key)
+        dist_value = dist.get(key)
+        if ref_value and dist_value and ref_value != dist_value:
+            errors.append(f"{key} mismatch: ref={ref_value} dist={dist_value}")
+
+    if is_abr_mode(codec_mode):
+        measured = dist.get("bit_rate_mbps")
+        if measured is None:
+            errors.append("Bitrate information missing for ABR mode")
+        elif target_bitrate_mbps is not None and measured > target_bitrate_mbps * 1.10:
+            errors.append(
+                f"Bitrate mismatch for ABR: {measured:.2f} Mbps exceeds "
+                f"{target_bitrate_mbps * 1.10:.2f} Mbps"
+            )
+
+    return EncodeValidation(
+        ok=not errors,
+        errors=errors,
+        probe={"reference": ref["probe"], "distorted": dist["probe"]},
+    )
 
 
 def _lavfi_relative_path(path: str) -> str:
@@ -195,6 +360,7 @@ def _compute_vmaf_native(
     n_subsample: int,
     n_threads: int,
     model: str,
+    timeout: Optional[float],
 ) -> float:
     ffmpeg = resolve_binary("ffmpeg", ffmpeg_bin)
 
@@ -228,7 +394,7 @@ def _compute_vmaf_native(
             "null",
             "-",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode != 0 or not os.path.isfile(log_path):
             raise RuntimeError(
                 "VMAF computation failed (native):\n"
@@ -237,17 +403,21 @@ def _compute_vmaf_native(
         return _parse_vmaf_json(log_path)
 
 
-def _default_vmaf_model_path() -> Optional[str]:
-    """Prefer the subnet NEG model file when present on the host."""
+def _default_vmaf_model_path(model: str) -> Optional[str]:
+    """Resolve NEG/base VMAF JSON from the subnet checkout."""
+    is_neg = "neg" in model.lower()
+    filename = "vmaf_v0.6.1neg.json" if is_neg else "vmaf_v0.6.1.json"
+    env_name = "VMAF_NEG_MODEL_PATH" if is_neg else "VMAF_BASE_MODEL_PATH"
     candidates = [
-        os.environ.get("VMAF_MODEL_PATH", "").strip(),
-        "/root/terry/vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json",
+        os.environ.get(env_name, "").strip(),
+        os.environ.get("VMAF_MODEL_PATH", "").strip() if is_neg else "",
+        os.path.join("/root/terry/vidaio-subnet/vmaf/model", filename),
         os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "vidaio-subnet",
             "vmaf",
             "model",
-            "vmaf_v0.6.1neg.json",
+            filename,
         ),
     ]
     for path in candidates:
@@ -260,12 +430,25 @@ def _libvmaf_model_option(model: str, model_path: Optional[str] = None) -> tuple
     """Return (libvmaf model=... value, host path to mount or None)."""
     if model_path and os.path.isfile(model_path):
         return f"path={os.path.abspath(model_path)}", os.path.abspath(model_path)
-    # If caller passed version=neg but image lacks built-ins, fall back to host file.
-    if "neg" in model and "path=" not in model:
-        fallback = _default_vmaf_model_path()
+    # Local eval images may not register either model as a built-in. Mount the
+    # same JSON model files used by the subnet checkout.
+    if "version=" in model and "path=" not in model:
+        fallback = _default_vmaf_model_path(model)
         if fallback:
             return f"path={fallback}", fallback
     return model, None
+
+
+_GPU_DOCKER_FALLBACK_MARKERS = (
+    "driver/library version mismatch",
+    "driver not loaded",
+    "nvidia-container-cli",
+    "CUDA_ERROR_NOT_PERMITTED",
+    "CUDA_ERROR_NO_DEVICE",
+    "cuCtxCreate",
+    "cuInit",
+)
+_GPU_DOCKER_VMAF_SLOTS = threading.Semaphore(1)
 
 
 def _compute_vmaf_docker(
@@ -278,11 +461,13 @@ def _compute_vmaf_docker(
     n_threads: int,
     model: str,
     model_path: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> float:
     """Run VMAF inside a Docker image that provides ffmpeg+libvmaf.
 
     Uses ``--entrypoint ffmpeg`` so both validator images (ENTRYPOINT ffmpeg)
     and local eval images (python entrypoint) work.
+  When GPU Docker init fails (driver mismatch, etc.), retries once with CPU libvmaf.
     """
     dist_path = os.path.abspath(distorted_path)
     ref_path = os.path.abspath(reference_path)
@@ -290,70 +475,103 @@ def _compute_vmaf_docker(
     ref_dir = os.path.dirname(ref_path)
     model_opt, mount_model = _libvmaf_model_option(model, model_path)
 
-    with tempfile.TemporaryDirectory(prefix="vmaf_docker_") as tmp:
-        log_path = os.path.join(tmp, "vmaf.json")
-        volumes = {dist_dir, ref_dir, tmp}
-        if mount_model:
-            volumes.add(os.path.dirname(mount_model))
-        vol_args: list[str] = []
-        for vol in sorted(volumes):
-            vol_args.extend(["-v", f"{vol}:{vol}"])
+    gpu_attempts = [True, False] if use_gpus else [False]
+    last_stderr = ""
 
-        if use_gpus:
-            filter_graph = (
-                f"[0:v]format=yuv420p,hwupload_cuda[dis];"
-                f"[1:v]format=yuv420p,hwupload_cuda[ref];"
-                f"[dis][ref]libvmaf_cuda="
-                f"n_subsample={n_subsample}:"
-                f"model='{model_opt}':"
-                f"log_fmt=json:"
-                f"log_path={log_path}"
+    for attempt_gpu in gpu_attempts:
+        with tempfile.TemporaryDirectory(prefix="vmaf_docker_") as tmp:
+            log_path = os.path.join(tmp, "vmaf.json")
+            volumes = {dist_dir, ref_dir, tmp}
+            if mount_model:
+                volumes.add(os.path.dirname(mount_model))
+            vol_args: list[str] = []
+            for vol in sorted(volumes):
+                vol_args.extend(["-v", f"{vol}:{vol}"])
+
+            if attempt_gpu:
+                filter_graph = (
+                    f"[0:v]format=yuv420p,hwupload_cuda[dis];"
+                    f"[1:v]format=yuv420p,hwupload_cuda[ref];"
+                    f"[dis][ref]libvmaf_cuda="
+                    f"n_subsample={n_subsample}:"
+                    f"model='{model_opt}':"
+                    f"log_fmt=json:"
+                    f"log_path={log_path}"
+                )
+            else:
+                filter_graph = (
+                    f"[0:v]setpts=PTS-STARTPTS,setsar=1[main];"
+                    f"[1:v]setpts=PTS-STARTPTS,setsar=1[ref];"
+                    f"[main][ref]libvmaf="
+                    f"model={model_opt}:"
+                    f"log_fmt=json:"
+                    f"log_path={log_path}:"
+                    f"pool=harmonic_mean:"
+                    f"n_threads={n_threads}:"
+                    f"n_subsample={n_subsample}"
+                )
+
+            # Force ffmpeg entrypoint: validator image uses ENTRYPOINT ["ffmpeg"],
+            # while some eval images may default to python.
+            cmd = ["docker", "run", "--rm", "--entrypoint", "ffmpeg"]
+            if attempt_gpu:
+                cmd.extend(
+                    [
+                        "--gpus",
+                        "all",
+                        "-e",
+                        "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility",
+                    ]
+                )
+            cmd.extend(vol_args)
+            cmd.extend(
+                [
+                    docker_image,
+                    "-hide_banner",
+                    "-i",
+                    dist_path,
+                    "-i",
+                    ref_path,
+                    "-lavfi",
+                    filter_graph,
+                    "-f",
+                    "null",
+                    "-",
+                ]
             )
-        else:
-            filter_graph = (
-                f"[0:v]setpts=PTS-STARTPTS,setsar=1[main];"
-                f"[1:v]setpts=PTS-STARTPTS,setsar=1[ref];"
-                f"[main][ref]libvmaf="
-                f"model={model_opt}:"
-                f"log_fmt=json:"
-                f"log_path={log_path}:"
-                f"pool=harmonic_mean:"
-                f"n_threads={n_threads}:"
-                f"n_subsample={n_subsample}"
-            )
 
-        # Force ffmpeg entrypoint: validator image uses ENTRYPOINT ["ffmpeg"],
-        # while local eval images (e.g. vidaio-compression-eval) may default to python.
-        cmd = ["docker", "run", "--rm", "--entrypoint", "ffmpeg"]
-        if use_gpus:
-            cmd.extend(["--gpus", "all"])
-        cmd.extend(vol_args)
-        cmd.extend(
-            [
-                docker_image,
-                "-hide_banner",
-                "-i",
-                dist_path,
-                "-i",
-                ref_path,
-                "-lavfi",
-                filter_graph,
-                "-f",
-                "null",
-                "-",
-            ]
-        )
+            gpu_slot = _GPU_DOCKER_VMAF_SLOTS if attempt_gpu else None
+            if gpu_slot is not None:
+                gpu_slot.acquire()
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout
+                )
+            finally:
+                if gpu_slot is not None:
+                    gpu_slot.release()
+            last_stderr = result.stderr or ""
+            if result.returncode == 0 and os.path.isfile(log_path):
+                return _parse_vmaf_json(log_path)
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0 or not os.path.isfile(log_path):
+            if (
+                attempt_gpu
+                and any(marker in last_stderr for marker in _GPU_DOCKER_FALLBACK_MARKERS)
+            ):
+                continue
+
             raise RuntimeError(
                 "VMAF computation failed (docker):\n"
-                + (result.stderr[-2000:] if result.stderr else "no stderr")
+                + (last_stderr[-2000:] if last_stderr else "no stderr")
                 + "\nHint: use an image with libvmaf, e.g.\n"
-                "  --vmaf-docker-image vidaio-compression-eval\n"
+                "  --vmaf-docker-image vmaf_ffmpeg\n"
                 "and ensure NEG model exists at vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json"
             )
-        return _parse_vmaf_json(log_path)
+
+    raise RuntimeError(
+        "VMAF computation failed (docker):\n"
+        + (last_stderr[-2000:] if last_stderr else "no stderr")
+    )
 
 
 def compute_vmaf(
@@ -365,8 +583,9 @@ def compute_vmaf(
     n_threads: int = 4,
     model: str = "version=vmaf_v0.6.1neg",
     vmaf_backend: str = "docker",
-    vmaf_docker_image: str = "vidaio-compression-eval",
+    vmaf_docker_image: str = "vmaf_ffmpeg",
     vmaf_docker_gpus: bool = False,
+    timeout: Optional[float] = None,
 ) -> float:
     backend = (vmaf_backend or "docker").lower().strip()
     if backend == "native":
@@ -377,16 +596,18 @@ def compute_vmaf(
             n_subsample=n_subsample,
             n_threads=n_threads,
             model=model,
+            timeout=timeout,
         )
     if backend == "docker":
         return _compute_vmaf_docker(
             reference_path,
             distorted_path,
-            docker_image=vmaf_docker_image or "vidaio-compression-eval",
+            docker_image=vmaf_docker_image or "vmaf_ffmpeg",
             use_gpus=bool(vmaf_docker_gpus),
             n_subsample=n_subsample,
             n_threads=n_threads,
             model=model,
+            timeout=timeout,
         )
     raise ValueError(f"Unknown vmaf_backend: {vmaf_backend!r}")
 
@@ -401,6 +622,10 @@ class ScoreResult:
     quality_component: float
     reason: str
     validation_errors: list[str]
+    vmaf_base: Optional[float] = None
+    vmaf_delta: Optional[float] = None
+    passed_encoding_gates: bool = False
+    passed_vmaf_delta_gate: bool = False
 
     @property
     def ok(self) -> bool:
@@ -417,12 +642,152 @@ def score_candidate(
     vmaf_n_subsample: int = 1,
     vmaf_n_threads: int = 4,
     vmaf_backend: str = "docker",
-    vmaf_docker_image: str = "vidaio-compression-eval",
+    vmaf_docker_image: str = "vmaf_ffmpeg",
     vmaf_docker_gpus: bool = False,
     compression_rate_override: Optional[float] = None,
+    codec_mode: str = "RC",
+    target_bitrate_mbps: Optional[float] = None,
+    timeout: Optional[float] = None,
+    pair_gates: bool = True,
+    neg_only: bool = False,
 ) -> ScoreResult:
-    validation = validate_hevc_output(distorted_path, ffprobe_bin)
-    if not validation.ok:
+    started = time.monotonic()
+
+    def remaining() -> Optional[float]:
+        if timeout is None:
+            return None
+        left = float(timeout) - (time.monotonic() - started)
+        if left <= 0:
+            raise TimeoutError("candidate scoring deadline exhausted")
+        return left
+
+    try:
+        if pair_gates:
+            validation = validate_validator_gates(
+                reference_path,
+                distorted_path,
+                ffprobe_bin=ffprobe_bin,
+                codec_mode=codec_mode,
+                target_bitrate_mbps=target_bitrate_mbps,
+                timeout=remaining(),
+            )
+        else:
+            validation = validate_hevc_output(
+                distorted_path,
+                ffprobe_bin=ffprobe_bin,
+                timeout=remaining(),
+            )
+        if not validation.ok:
+            return ScoreResult(
+                s_f=0.0,
+                vmaf=0.0,
+                compression_rate=1.0,
+                compression_ratio=1.0,
+                compression_component=0.0,
+                quality_component=0.0,
+                reason="encoding_gate_failed",
+                validation_errors=validation.errors,
+            )
+
+        if compression_rate_override is not None:
+            compression_rate = float(compression_rate_override)
+        else:
+            original_size = os.path.getsize(reference_path)
+            compressed_size = os.path.getsize(distorted_path)
+            # The validator clamps non-compressing outputs to a rate of 1.0.
+            compression_rate = (
+                compressed_size / original_size
+                if original_size > 0 and compressed_size < original_size
+                else 1.0
+            )
+
+        vmaf_neg = compute_vmaf(
+            reference_path,
+            distorted_path,
+            ffmpeg_bin=ffmpeg_bin,
+            n_subsample=vmaf_n_subsample,
+            n_threads=vmaf_n_threads,
+            vmaf_backend=vmaf_backend,
+            vmaf_docker_image=vmaf_docker_image,
+            vmaf_docker_gpus=vmaf_docker_gpus,
+            model=NEG_MODEL,
+            timeout=remaining(),
+        )
+        if neg_only:
+            s_f, c_comp, q_comp, reason = calculate_compression_score(
+                vmaf_score=vmaf_neg,
+                compression_rate=compression_rate,
+                vmaf_threshold=vmaf_threshold,
+            )
+            return ScoreResult(
+                s_f=s_f,
+                vmaf=vmaf_neg,
+                compression_rate=compression_rate,
+                compression_ratio=1.0 / max(compression_rate, 1e-9),
+                compression_component=c_comp,
+                quality_component=q_comp,
+                reason=reason,
+                validation_errors=[],
+                vmaf_base=None,
+                vmaf_delta=None,
+                passed_encoding_gates=True,
+                passed_vmaf_delta_gate=True,
+            )
+
+        vmaf_base = compute_vmaf(
+            reference_path,
+            distorted_path,
+            ffmpeg_bin=ffmpeg_bin,
+            n_subsample=vmaf_n_subsample,
+            n_threads=vmaf_n_threads,
+            vmaf_backend=vmaf_backend,
+            vmaf_docker_image=vmaf_docker_image,
+            vmaf_docker_gpus=vmaf_docker_gpus,
+            model=BASE_MODEL,
+            timeout=remaining(),
+        )
+        vmaf_delta = abs(vmaf_base - vmaf_neg)
+
+        if vmaf_delta > MAX_VMAF_MODEL_DELTA:
+            return ScoreResult(
+                s_f=0.0,
+                vmaf=vmaf_neg,
+                compression_rate=compression_rate,
+                compression_ratio=1.0 / max(compression_rate, 1e-9),
+                compression_component=0.0,
+                quality_component=0.0,
+                reason=(
+                    f"VMAF model delta {vmaf_delta:.2f} > "
+                    f"{MAX_VMAF_MODEL_DELTA:.2f} (enhancement/sharpening detected)"
+                ),
+                validation_errors=[],
+                vmaf_base=vmaf_base,
+                vmaf_delta=vmaf_delta,
+                passed_encoding_gates=True,
+                passed_vmaf_delta_gate=False,
+            )
+
+        s_f, c_comp, q_comp, reason = calculate_compression_score(
+            vmaf_score=vmaf_neg,
+            compression_rate=compression_rate,
+            vmaf_threshold=vmaf_threshold,
+        )
+
+        return ScoreResult(
+            s_f=s_f,
+            vmaf=vmaf_neg,
+            compression_rate=compression_rate,
+            compression_ratio=1.0 / max(compression_rate, 1e-9),
+            compression_component=c_comp,
+            quality_component=q_comp,
+            reason=reason,
+            validation_errors=[],
+            vmaf_base=vmaf_base,
+            vmaf_delta=vmaf_delta,
+            passed_encoding_gates=True,
+            passed_vmaf_delta_gate=True,
+        )
+    except (TimeoutError, subprocess.TimeoutExpired) as exc:
         return ScoreResult(
             s_f=0.0,
             vmaf=0.0,
@@ -430,41 +795,6 @@ def score_candidate(
             compression_ratio=1.0,
             compression_component=0.0,
             quality_component=0.0,
-            reason="validation_failed",
-            validation_errors=validation.errors,
+            reason=f"scoring_timeout: {exc}",
+            validation_errors=[str(exc)],
         )
-
-    if compression_rate_override is not None:
-        compression_rate = float(compression_rate_override)
-    else:
-        original_size = os.path.getsize(reference_path)
-        compressed_size = os.path.getsize(distorted_path)
-        compression_rate = compressed_size / max(original_size, 1)
-
-    vmaf = compute_vmaf(
-        reference_path,
-        distorted_path,
-        ffmpeg_bin=ffmpeg_bin,
-        n_subsample=vmaf_n_subsample,
-        n_threads=vmaf_n_threads,
-        vmaf_backend=vmaf_backend,
-        vmaf_docker_image=vmaf_docker_image,
-        vmaf_docker_gpus=vmaf_docker_gpus,
-    )
-
-    s_f, c_comp, q_comp, reason = calculate_compression_score(
-        vmaf_score=vmaf,
-        compression_rate=compression_rate,
-        vmaf_threshold=vmaf_threshold,
-    )
-
-    return ScoreResult(
-        s_f=s_f,
-        vmaf=vmaf,
-        compression_rate=compression_rate,
-        compression_ratio=1.0 / max(compression_rate, 1e-9),
-        compression_component=c_comp,
-        quality_component=q_comp,
-        reason=reason,
-        validation_errors=[],
-    )

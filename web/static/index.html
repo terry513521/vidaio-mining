@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vidaio Compression Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #171d25;
+      --panel-2: #1f2732;
+      --text: #e7edf4;
+      --muted: #93a1b3;
+      --accent: #4da3ff;
+      --good: #3ecf8e;
+      --warn: #ffb020;
+      --border: #2a3441;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      background: radial-gradient(circle at top, #18202b 0%, var(--bg) 45%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    header {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 16px; margin-bottom: 24px;
+    }
+    h1 { margin: 0; font-size: 1.5rem; }
+    .sub { color: var(--muted); font-size: 0.9rem; margin-top: 4px; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .metric { font-size: 1.35rem; font-weight: 700; }
+    .bar {
+      height: 8px; background: var(--panel-2); border-radius: 999px;
+      overflow: hidden; margin-top: 10px;
+    }
+    .bar > span {
+      display: block; height: 100%; background: linear-gradient(90deg, var(--accent), #7cc4ff);
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+    .bar.warn > span { background: linear-gradient(90deg, var(--warn), #ffd27a); }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+      margin-bottom: 16px;
+    }
+    select, button, a.btn {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 0.95rem;
+    }
+    select { min-width: 360px; max-width: 100%; flex: 1; }
+    button, a.btn {
+      cursor: pointer; text-decoration: none; display: inline-block;
+    }
+    button:hover, a.btn:hover { border-color: var(--accent); }
+    .stats {
+      display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;
+    }
+    .pill {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    .pill strong { color: var(--text); }
+    .players {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 900px) {
+      .players { grid-template-columns: 1fr; }
+    }
+    .player-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px;
+    }
+    .player-card h2 {
+      margin: 0 0 10px;
+      font-size: 1rem;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    video {
+      width: 100%;
+      background: #000;
+      border-radius: 10px;
+      aspect-ratio: 16 / 9;
+      object-fit: contain;
+    }
+    .empty {
+      color: var(--muted);
+      padding: 48px 16px;
+      text-align: center;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+    }
+    .gpu-list { display: grid; gap: 8px; margin-top: 8px; }
+    .gpu-item {
+      font-size: 0.85rem;
+      color: var(--muted);
+      padding: 8px 10px;
+      background: var(--panel-2);
+      border-radius: 8px;
+    }
+    footer {
+      margin-top: 24px;
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+    .fetch-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .fetch-status {
+      color: var(--muted);
+      font-size: 0.9rem;
+      flex: 1;
+      min-width: 240px;
+    }
+    .fetch-status.running { color: var(--accent); }
+    .fetch-status.done { color: var(--good); }
+    .fetch-status.error { color: var(--warn); }
+    label.check {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .compress-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .compress-panel h2 {
+      margin: 0 0 4px;
+      font-size: 1rem;
+    }
+    .compress-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-end;
+      margin-top: 12px;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 120px;
+    }
+    .field label {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .field select,
+    .field input[type="text"],
+    .field input[type="number"] {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      min-width: 0;
+    }
+    .video-pick {
+      margin-top: 14px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+    .video-pick-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .video-checklist {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 8px;
+      max-height: 180px;
+      overflow: auto;
+      padding: 8px;
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .video-checklist label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .compress-status {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .compress-status.running { color: var(--accent); }
+    .compress-status.done { color: var(--good); }
+    .compress-status.error { color: var(--warn); }
+    .compress-terminal {
+      margin-top: 12px;
+      background: #0a0e12;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 14px;
+      max-height: 360px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.78rem;
+      line-height: 1.45;
+      color: #b8c5d6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .compress-terminal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+    }
+    .hidden { display: none !important; }
+    .encode-settings {
+      margin-top: 14px;
+      border-top: 1px solid var(--border);
+      padding-top: 14px;
+    }
+    .encode-settings summary {
+      cursor: pointer;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 10px;
+    }
+    .encode-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    .field-wide {
+      grid-column: 1 / -1;
+    }
+    .field textarea {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 0.85rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      min-height: 72px;
+      resize: vertical;
+      width: 100%;
+    }
+    .field textarea:read-only,
+    .field input:read-only {
+      opacity: 0.85;
+      cursor: default;
+    }
+    .x265-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+      gap: 10px;
+      margin-top: 8px;
+    }
+    .subheading {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      margin: 8px 0;
+    }
+    .pill.wide {
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Vidaio Compression Dashboard</h1>
+        <div class="sub">Compare original vs compressed videos and monitor this VM</div>
+      </div>
+      <div class="sub" id="clock">—</div>
+    </header>
+
+    <section class="grid" id="system-grid">
+      <div class="card"><h3>CPU</h3><div class="metric" id="cpu-metric">—</div><div class="bar"><span id="cpu-bar"></span></div></div>
+      <div class="card"><h3>Memory</h3><div class="metric" id="mem-metric">—</div><div class="bar"><span id="mem-bar"></span></div></div>
+      <div class="card"><h3>Disk</h3><div class="metric" id="disk-metric">—</div><div class="bar warn"><span id="disk-bar"></span></div></div>
+      <div class="card"><h3>Load Avg</h3><div class="metric" id="load-metric">—</div><div class="sub" id="cpu-count">—</div></div>
+      <div class="card" style="grid-column: span 2;">
+        <h3>GPU</h3>
+        <div id="gpu-metric" class="metric">—</div>
+        <div class="gpu-list" id="gpu-list"></div>
+      </div>
+    </section>
+
+    <section class="fetch-panel">
+      <div>
+        <strong>Challenge videos</strong>
+        <div class="sub">Auto-discover validator output.log from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB workspace</a> and download challenge videos</div>
+      </div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <button id="fetch-challenges" type="button">Fetch from WandB</button>
+        <button id="refresh-videos" type="button">Refresh list</button>
+        <label class="check"><input id="compressed-only" type="checkbox" /> Compressed only</label>
+      </div>
+      <div class="fetch-status" id="fetch-status">Ready</div>
+      <div id="fetch-terminal-wrap" class="hidden" style="width:100%;">
+        <div class="compress-terminal-header">
+          <span>Fetch log</span>
+          <span id="fetch-terminal-meta"></span>
+        </div>
+        <pre id="fetch-terminal" class="compress-terminal"></pre>
+      </div>
+    </section>
+
+    <section class="compress-panel">
+      <h2>Compress videos</h2>
+      <div class="sub">Run fleet compression on selected challenge videos</div>
+      <div class="compress-row">
+        <div class="field">
+          <label for="codec-mode">Codec mode</label>
+          <select id="codec-mode">
+            <option value="crf" selected>crf</option>
+            <option value="vbr">vbr</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="vmaf-threshold">VMAF threshold</label>
+          <select id="vmaf-threshold">
+            <option value="85">85</option>
+            <option value="89" selected>89</option>
+            <option value="93">93</option>
+          </select>
+        </div>
+        <div class="field hidden" id="target-bitrate-field">
+          <label for="target-bitrate">Target bitrate</label>
+          <input id="target-bitrate" type="text" placeholder="e.g. 8M" value="8M" />
+        </div>
+        <div class="field">
+          <label for="select-count">Select count</label>
+          <select id="select-count">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+          </select>
+        </div>
+        <button id="select-videos" type="button">Select videos</button>
+        <button id="compress-btn" type="button">Compress</button>
+      </div>
+      <details class="encode-settings" open>
+        <summary>Encode settings</summary>
+        <div class="encode-grid">
+          <div class="field">
+            <label for="encoder">Encoder</label>
+            <select id="encoder">
+              <option value="libx265">libx265</option>
+              <option value="hevc_nvenc">hevc_nvenc</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="preset">Preset</label>
+            <select id="preset"></select>
+          </div>
+          <div class="field libx265-only">
+            <label for="libx265-profile">Profile</label>
+            <select id="libx265-profile">
+              <option value="main">main</option>
+              <option value="main10">main10</option>
+              <option value="mainstillpicture">mainstillpicture</option>
+              <option value="rext">rext</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="crf-min">CRF min</label>
+            <input id="crf-min" type="number" min="0" max="51" />
+          </div>
+          <div class="field">
+            <label for="crf-max">CRF max</label>
+            <input id="crf-max" type="number" min="0" max="51" />
+          </div>
+          <div class="field">
+            <label for="crf-candidates">CRF candidates</label>
+            <input id="crf-candidates" type="number" min="1" max="10" />
+          </div>
+          <div class="field">
+            <label for="crf-spread">CRF spread</label>
+            <input id="crf-spread" type="number" min="1" max="10" />
+          </div>
+          <div class="field nvenc-only hidden">
+            <label for="nvenc-rc">NVENC RC</label>
+            <select id="nvenc-rc">
+              <option value="vbr">vbr</option>
+              <option value="vbr_hq">vbr_hq</option>
+              <option value="cbr">cbr</option>
+              <option value="cbr_hq">cbr_hq</option>
+              <option value="constqp">constqp</option>
+            </select>
+          </div>
+          <div class="field nvenc-only hidden">
+            <label for="nvenc-multipass">NVENC multipass</label>
+            <select id="nvenc-multipass">
+              <option value="disabled">disabled</option>
+              <option value="qres">qres</option>
+              <option value="fullres">fullres</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="check" style="margin-top:22px;">
+              <input id="libx265-feature-baseline" type="checkbox" checked />
+              Feature x265 baseline
+            </label>
+          </div>
+        </div>
+        <div class="field field-wide libx265-only">
+          <label for="libx265-params">x265-params (colon-separated)</label>
+          <textarea id="libx265-params" readonly placeholder="aq-mode=3:rd=5:ref=4:bframes=6:rc-lookahead=40:keyint=48:min-keyint=1:scenecut=40"></textarea>
+        </div>
+        <div class="libx265-only">
+          <div class="subheading">x265-params detail</div>
+          <div class="x265-grid" id="x265-detail-grid"></div>
+        </div>
+      </details>
+      <div class="video-pick">
+        <div class="video-pick-toolbar">
+          <span class="sub" id="selected-count">0 selected</span>
+        </div>
+        <div class="video-checklist" id="video-checklist"></div>
+      </div>
+      <div class="compress-status" id="compress-status">Ready</div>
+      <div id="compress-terminal-wrap" class="hidden">
+        <div class="compress-terminal-header">
+          <span>Compression log</span>
+          <span id="compress-terminal-meta"></span>
+        </div>
+        <pre id="compress-terminal" class="compress-terminal"></pre>
+      </div>
+    </section>
+
+    <section class="controls">
+      <select id="video-select"><option value="">Loading videos…</option></select>
+      <button id="sync-play" type="button">Play both</button>
+      <button id="sync-pause" type="button">Pause both</button>
+      <a class="btn" id="dl-original" href="#">Download original</a>
+      <a class="btn" id="dl-compressed" href="#">Download compressed</a>
+    </section>
+
+    <div class="stats" id="video-stats"></div>
+
+    <section class="players">
+      <div class="player-card">
+        <h2>Original <span class="sub" id="original-size"></span></h2>
+        <video id="original-video" controls preload="metadata"></video>
+      </div>
+      <div class="player-card">
+        <h2>Compressed <span class="sub" id="compressed-size"></span></h2>
+        <div id="compressed-wrap">
+          <video id="compressed-video" controls preload="metadata"></video>
+        </div>
+      </div>
+    </section>
+
+    <footer>Auto-refresh system stats every 3s · Videos served from local compression folder</footer>
+  </div>
+
+  <script>
+    const videoSelect = document.getElementById("video-select");
+    const originalVideo = document.getElementById("original-video");
+    const compressedVideo = document.getElementById("compressed-video");
+    const compressedWrap = document.getElementById("compressed-wrap");
+    const videoStats = document.getElementById("video-stats");
+    const dlOriginal = document.getElementById("dl-original");
+    const dlCompressed = document.getElementById("dl-compressed");
+
+    let catalog = [];
+    let fetchPollTimer = null;
+    let compressPollTimer = null;
+
+    const X265_DETAIL_KEYS = [
+      ["aq-mode", "AQ mode"],
+      ["rd", "RD"],
+      ["ref", "Ref frames"],
+      ["bframes", "B-frames"],
+      ["rc-lookahead", "RC lookahead"],
+      ["keyint", "Keyint"],
+      ["min-keyint", "Min keyint"],
+      ["scenecut", "Scenecut"],
+      ["me", "ME"],
+      ["subme", "SubME"],
+      ["merange", "ME range"],
+    ];
+
+    const LIBX265_PRESETS = [
+      "ultrafast", "superfast", "veryfast", "faster", "fast",
+      "medium", "slow", "slower", "veryslow", "placebo",
+    ];
+    const NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+
+    function parseX265Params(text) {
+      const out = {};
+      for (const part of String(text || "").split(":")) {
+        const trimmed = part.trim();
+        if (!trimmed) continue;
+        const eq = trimmed.indexOf("=");
+        if (eq === -1) continue;
+        out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
+      }
+      return out;
+    }
+
+    function renderX265DetailGrid() {
+      const grid = document.getElementById("x265-detail-grid");
+      grid.innerHTML = "";
+      for (const [key, label] of X265_DETAIL_KEYS) {
+        const wrap = document.createElement("div");
+        wrap.className = "field";
+        const lbl = document.createElement("label");
+        lbl.textContent = label;
+        lbl.setAttribute("for", `x265-${key}`);
+        const input = document.createElement("input");
+        input.id = `x265-${key}`;
+        input.type = "text";
+        input.readOnly = true;
+        input.dataset.x265Key = key;
+        wrap.appendChild(lbl);
+        wrap.appendChild(input);
+        grid.appendChild(wrap);
+      }
+    }
+
+    function syncX265TextareaToDetail() {
+      const params = parseX265Params(document.getElementById("libx265-params").value);
+      for (const input of document.querySelectorAll("#x265-detail-grid input")) {
+        const key = input.dataset.x265Key;
+        input.value = params[key] ?? "";
+      }
+    }
+
+    function populatePresetOptions(encoder) {
+      const preset = document.getElementById("preset");
+      const current = preset.value;
+      const options = encoder === "hevc_nvenc" ? NVENC_PRESETS : LIBX265_PRESETS;
+      preset.innerHTML = "";
+      for (const name of options) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        preset.appendChild(opt);
+      }
+      if (options.includes(current)) preset.value = current;
+      else preset.value = encoder === "hevc_nvenc" ? "p5" : "medium";
+    }
+
+    function toggleEncoderFields() {
+      const isNvenc = document.getElementById("encoder").value === "hevc_nvenc";
+      document.querySelectorAll(".libx265-only").forEach(el => el.classList.toggle("hidden", isNvenc));
+      document.querySelectorAll(".nvenc-only").forEach(el => el.classList.toggle("hidden", !isNvenc));
+      populatePresetOptions(document.getElementById("encoder").value);
+    }
+
+    async function loadEncodeDefaults() {
+      try {
+        const res = await fetch("/api/encode-defaults");
+        const data = await res.json();
+        const d = data.defaults || {};
+        if (d.encoder) document.getElementById("encoder").value = d.encoder;
+        toggleEncoderFields();
+        if (d.preset) document.getElementById("preset").value = d.preset;
+        if (d.libx265_profile) document.getElementById("libx265-profile").value = d.libx265_profile;
+        if (d.libx265_params) document.getElementById("libx265-params").value = d.libx265_params;
+        if (d.crf_min != null) document.getElementById("crf-min").value = d.crf_min;
+        if (d.crf_max != null) document.getElementById("crf-max").value = d.crf_max;
+        if (d.crf_candidates != null) document.getElementById("crf-candidates").value = d.crf_candidates;
+        if (d.crf_spread != null) document.getElementById("crf-spread").value = d.crf_spread;
+        if (d.nvenc_rc) document.getElementById("nvenc-rc").value = d.nvenc_rc;
+        if (d.nvenc_multipass) document.getElementById("nvenc-multipass").value = d.nvenc_multipass;
+        if (d.libx265_feature_baseline != null) {
+          document.getElementById("libx265-feature-baseline").checked = Boolean(d.libx265_feature_baseline);
+        }
+        syncX265TextareaToDetail();
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function collectEncodeParams() {
+      const encoder = document.getElementById("encoder").value;
+      const params = {
+        encoder,
+        preset: document.getElementById("preset").value,
+        crf_min: Number(document.getElementById("crf-min").value),
+        crf_max: Number(document.getElementById("crf-max").value),
+        crf_candidates: Number(document.getElementById("crf-candidates").value),
+        crf_spread: Number(document.getElementById("crf-spread").value),
+        libx265_feature_baseline: document.getElementById("libx265-feature-baseline").checked,
+      };
+      if (encoder === "libx265") {
+        params.libx265_profile = document.getElementById("libx265-profile").value;
+        const x265 = document.getElementById("libx265-params").value.trim();
+        if (x265) params.libx265_params = x265;
+      } else {
+        params.nvenc_rc = document.getElementById("nvenc-rc").value;
+        params.nvenc_multipass = document.getElementById("nvenc-multipass").value;
+      }
+      return params;
+    }
+
+    function pctBar(el, value) {
+      const v = Math.max(0, Math.min(100, Number(value) || 0));
+      el.style.width = `${v}%`;
+    }
+
+    function fmtLoad(load) {
+      if (!load) return "—";
+      const a = load["1m"], b = load["5m"], c = load["15m"];
+      if ([a,b,c].every(x => x == null)) return "—";
+      return `${a?.toFixed?.(2) ?? "—"} / ${b?.toFixed?.(2) ?? "—"} / ${c?.toFixed?.(2) ?? "—"}`;
+    }
+
+    async function refreshSystem() {
+      try {
+        const res = await fetch("/api/system");
+        const data = await res.json();
+        document.getElementById("clock").textContent = new Date(data.timestamp).toLocaleString();
+        document.getElementById("cpu-metric").textContent = `${data.cpu_percent.toFixed(1)}%`;
+        pctBar(document.getElementById("cpu-bar"), data.cpu_percent);
+        document.getElementById("mem-metric").textContent = `${data.memory.used_human} / ${data.memory.total_human}`;
+        pctBar(document.getElementById("mem-bar"), data.memory.percent);
+        document.getElementById("disk-metric").textContent = `${data.disk.used_human} / ${data.disk.total_human}`;
+        pctBar(document.getElementById("disk-bar"), data.disk.percent);
+        document.getElementById("load-metric").textContent = fmtLoad(data.load_avg);
+        document.getElementById("cpu-count").textContent = `${data.cpu_count} logical CPUs`;
+
+        const gpuList = document.getElementById("gpu-list");
+        gpuList.innerHTML = "";
+        if (!data.gpus?.length) {
+          document.getElementById("gpu-metric").textContent = "No GPU detected";
+        } else {
+          document.getElementById("gpu-metric").textContent = `${data.gpus.length} GPU(s)`;
+          for (const gpu of data.gpus) {
+            const div = document.createElement("div");
+            div.className = "gpu-item";
+            div.textContent = `#${gpu.index} ${gpu.name} · util ${gpu.utilization_pct ?? "—"}% · VRAM ${gpu.memory_used_mb ?? "—"}/${gpu.memory_total_mb ?? "—"} MB · ${gpu.temperature_c ?? "—"}°C`;
+            gpuList.appendChild(div);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function filteredCatalog() {
+      const onlyCompressed = document.getElementById("compressed-only").checked;
+      return onlyCompressed ? catalog.filter(v => v.has_compressed) : catalog;
+    }
+
+    function populateSelect(preferredName) {
+      const items = filteredCatalog();
+      videoSelect.innerHTML = "";
+      if (!items.length) {
+        videoSelect.innerHTML = '<option value="">No videos found</option>';
+        return;
+      }
+      for (const item of items) {
+        const opt = document.createElement("option");
+        opt.value = item.name;
+        const tag = item.has_compressed ? "✓ compressed" : "original only";
+        opt.textContent = `${item.name} (${tag})`;
+        videoSelect.appendChild(opt);
+      }
+      const preferred = items.find(v => v.name === preferredName)
+        || items.find(v => v.has_compressed)
+        || items[0];
+      videoSelect.value = preferred.name;
+      selectVideo(preferred.name);
+    }
+
+    function setFetchStatus(data, cls = "") {
+      const el = document.getElementById("fetch-status");
+      const errors = data.errors?.length ? ` · ${data.errors.length} error(s)` : "";
+      el.textContent = `${data.message || "Ready"}${errors}`;
+      el.className = `fetch-status ${cls}`.trim();
+    }
+
+    function renderFetchTerminal(data) {
+      const wrap = document.getElementById("fetch-terminal-wrap");
+      const term = document.getElementById("fetch-terminal");
+      const meta = document.getElementById("fetch-terminal-meta");
+      const log = data.log || "";
+      const show = Boolean(data.running || log || data.errors?.length);
+      wrap.classList.toggle("hidden", !show);
+      if (!show) return;
+      const errorLines = data.errors?.length ? `\nErrors:\n${data.errors.join("\n")}` : "";
+      term.textContent = (log || "Waiting for output…") + errorLines;
+      meta.textContent = data.running
+        ? "live"
+        : `${data.wandb_run ? data.wandb_run + " · " : ""}${data.done || 0} downloaded · ${data.skipped || 0} local · ${data.failed || 0} failed`;
+      if (data.running) {
+        term.scrollTop = term.scrollHeight;
+      }
+    }
+
+    async function pollFetchStatus() {
+      try {
+        const res = await fetch("/api/fetch-status");
+        const data = await res.json();
+        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setFetchStatus(data, cls);
+        renderFetchTerminal(data);
+        if (data.running) {
+          fetchPollTimer = setTimeout(pollFetchStatus, 1000);
+          return;
+        }
+        fetchPollTimer = null;
+        document.getElementById("fetch-challenges").disabled = false;
+        await loadVideos(videoSelect.value);
+      } catch (err) {
+        console.error(err);
+        document.getElementById("fetch-challenges").disabled = false;
+      }
+    }
+
+    async function startFetch() {
+      const btn = document.getElementById("fetch-challenges");
+      btn.disabled = true;
+      setFetchStatus({ message: "Starting fetch…" }, "running");
+      renderFetchTerminal({ running: true, log: "" });
+      try {
+        const res = await fetch("/api/fetch-challenges", { method: "POST" });
+        const data = await res.json();
+        if (!data.started) {
+          setFetchStatus(data.status, "running");
+          renderFetchTerminal(data.status || {});
+        }
+        pollFetchStatus();
+      } catch (err) {
+        setFetchStatus({ message: `Fetch failed: ${err}` }, "error");
+        btn.disabled = false;
+      }
+    }
+
+    async function initFetchMonitor() {
+      try {
+        const res = await fetch("/api/fetch-status");
+        const data = await res.json();
+        if (!data.running && !(data.log || "").trim() && !data.errors?.length) return;
+        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setFetchStatus(data, cls);
+        renderFetchTerminal(data);
+        if (data.running) {
+          document.getElementById("fetch-challenges").disabled = true;
+          pollFetchStatus();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    function renderStats(item) {
+      videoStats.innerHTML = "";
+      if (!item) return;
+      const req = item.request_params || {};
+      const enc = item.encode_params || {};
+      const codecMode = req.codec_mode;
+      const isBitrateMode = codecMode != null
+        && ["abr", "vbr", "bitrate"].includes(String(codecMode).toLowerCase());
+      const crfValue = enc.crf != null
+        ? enc.crf
+        : (req.crf_min != null && req.crf_max != null ? `${req.crf_min}–${req.crf_max}` : null);
+      const pills = [
+        ["Job", item.job_id || "—"],
+        ["Encoder", req.encoder || enc.encoder || "—"],
+        ["Codec Mode", codecMode || "—"],
+        ...(isBitrateMode ? [["Target Bitrate", req.target_bitrate || "—"]] : []),
+        ["Preset", req.preset || "—"],
+        ["Profile", req.libx265_profile || "—"],
+        ["CRF", crfValue != null ? crfValue : "—"],
+        ["Final Score", item.final_score != null ? item.final_score.toFixed(4) : "—"],
+        ["VMAF", item.vmaf != null ? item.vmaf.toFixed(2) : "—"],
+        ["Compression Rate", item.compression_rate != null ? item.compression_rate.toFixed(4) : "—"],
+        ["Compression Ratio", item.compression_ratio != null ? `${item.compression_ratio.toFixed(2)}x` : "—"],
+        ["Avg Bitrate", item.avg_bitrate_mbps != null ? `${item.avg_bitrate_mbps.toFixed(3)} Mbps` : "—"],
+        ["Elapsed", item.elapsed_sec != null ? `${item.elapsed_sec.toFixed(1)}s` : "—"],
+      ];
+      if (req.libx265_params) {
+        pills.push(["x265-params", req.libx265_params]);
+      }
+      for (const [label, value] of pills) {
+        const el = document.createElement("div");
+        el.className = "pill" + (label === "x265-params" ? " wide" : "");
+        if (label === "x265-params") el.title = String(value);
+        el.innerHTML = `${label}: <strong>${value}</strong>`;
+        videoStats.appendChild(el);
+      }
+    }
+
+    function selectVideo(name) {
+      const item = catalog.find(v => v.name === name);
+      if (!item) return;
+
+      const enc = encodeURIComponent(item.name);
+      originalVideo.src = `/media/original/${enc}`;
+      document.getElementById("original-size").textContent = item.original_size_human;
+      dlOriginal.href = `/download/original/${enc}`;
+
+      if (item.has_compressed) {
+        compressedWrap.innerHTML = '<video id="compressed-video" controls preload="metadata"></video>';
+        const cv = document.getElementById("compressed-video");
+        cv.src = `/media/compressed/${enc}`;
+        bindSync(cv);
+        document.getElementById("compressed-size").textContent = item.compressed_size_human;
+        dlCompressed.href = `/download/compressed/${enc}`;
+        dlCompressed.style.pointerEvents = "auto";
+        dlCompressed.style.opacity = "1";
+      } else {
+        compressedWrap.innerHTML = '<div class="empty">No compressed output yet for this video</div>';
+        document.getElementById("compressed-size").textContent = "";
+        dlCompressed.href = "#";
+        dlCompressed.style.pointerEvents = "none";
+        dlCompressed.style.opacity = "0.5";
+      }
+      renderStats(item);
+    }
+
+    function bindSync(otherVideo) {
+      const cv = otherVideo || compressedVideo;
+      document.getElementById("sync-play").onclick = () => {
+        originalVideo.play();
+        if (cv?.play) cv.play();
+      };
+      document.getElementById("sync-pause").onclick = () => {
+        originalVideo.pause();
+        if (cv?.pause) cv.pause();
+      };
+    }
+
+    async function loadVideos(preferredName) {
+      const res = await fetch("/api/videos");
+      const data = await res.json();
+      catalog = data.videos || [];
+      populateSelect(preferredName);
+      renderVideoChecklist();
+    }
+
+    function renderVideoChecklist() {
+      const list = document.getElementById("video-checklist");
+      const checked = new Set(
+        [...list.querySelectorAll('input[type="checkbox"]:checked')].map(el => el.value)
+      );
+      list.innerHTML = "";
+      for (const item of catalog) {
+        const label = document.createElement("label");
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.value = item.name;
+        input.checked = checked.has(item.name);
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(item.name));
+        list.appendChild(label);
+      }
+      updateSelectedCount();
+    }
+
+    function selectedVideoNames() {
+      return [...document.querySelectorAll("#video-checklist input:checked")].map(el => el.value);
+    }
+
+    function updateSelectedCount() {
+      const count = selectedVideoNames().length;
+      document.getElementById("selected-count").textContent = `${count} selected`;
+    }
+
+    function selectVideos(count) {
+      const boxes = [...document.querySelectorAll("#video-checklist input[type='checkbox']")];
+      boxes.forEach(box => { box.checked = false; });
+      for (const box of boxes.slice(0, count)) {
+        box.checked = true;
+      }
+      updateSelectedCount();
+    }
+
+    function toggleTargetBitrateField() {
+      const isVbr = document.getElementById("codec-mode").value === "vbr";
+      document.getElementById("target-bitrate-field").classList.toggle("hidden", !isVbr);
+    }
+
+    function setCompressStatus(data, cls = "") {
+      const el = document.getElementById("compress-status");
+      el.textContent = data.message || "Ready";
+      el.className = `compress-status ${cls}`.trim();
+    }
+
+    function renderCompressTerminal(data) {
+      const wrap = document.getElementById("compress-terminal-wrap");
+      const term = document.getElementById("compress-terminal");
+      const meta = document.getElementById("compress-terminal-meta");
+      const log = data.log || "";
+      const show = Boolean(data.running || log);
+      wrap.classList.toggle("hidden", !show);
+      if (!show) return;
+      term.textContent = log || "Waiting for output…";
+      meta.textContent = data.running ? "live" : `exit ${data.exit_code ?? "—"}`;
+      if (data.running) {
+        term.scrollTop = term.scrollHeight;
+      }
+    }
+
+    async function pollCompressStatus() {
+      try {
+        const res = await fetch("/api/compress-status");
+        const data = await res.json();
+        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setCompressStatus(data, cls);
+        renderCompressTerminal(data);
+        if (data.running) {
+          compressPollTimer = setTimeout(pollCompressStatus, 800);
+          return;
+        }
+        compressPollTimer = null;
+        document.getElementById("compress-btn").disabled = false;
+        await loadVideos(videoSelect.value);
+      } catch (err) {
+        console.error(err);
+        document.getElementById("compress-btn").disabled = false;
+      }
+    }
+
+    async function initCompressMonitor() {
+      try {
+        const res = await fetch("/api/compress-status");
+        const data = await res.json();
+        if (!data.running && !(data.log || "").trim()) return;
+        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setCompressStatus(data, cls);
+        renderCompressTerminal(data);
+        if (data.running) {
+          document.getElementById("compress-btn").disabled = true;
+          pollCompressStatus();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function startCompress() {
+      const btn = document.getElementById("compress-btn");
+      const videos = selectedVideoNames();
+      if (!videos.length) {
+        setCompressStatus({ message: "Select at least one video" }, "error");
+        return;
+      }
+      const codec_mode = document.getElementById("codec-mode").value;
+      const vmaf_threshold = Number(document.getElementById("vmaf-threshold").value);
+      const target_bitrate = document.getElementById("target-bitrate").value.trim();
+      if (codec_mode === "vbr" && !target_bitrate) {
+        setCompressStatus({ message: "Target bitrate is required for vbr mode" }, "error");
+        return;
+      }
+      btn.disabled = true;
+      setCompressStatus({ message: "Starting compression…" }, "running");
+      renderCompressTerminal({ running: true, log: "", exit_code: null });
+      try {
+        const body = { codec_mode, vmaf_threshold, videos, encode_params: collectEncodeParams() };
+        if (codec_mode === "vbr") body.target_bitrate = target_bitrate;
+        const res = await fetch("/api/compress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setCompressStatus({ message: data.error || "Compression request failed" }, "error");
+          btn.disabled = false;
+          return;
+        }
+        if (!data.started) {
+          setCompressStatus(data.status, "running");
+        }
+        pollCompressStatus();
+      } catch (err) {
+        setCompressStatus({ message: `Compression failed: ${err}` }, "error");
+        btn.disabled = false;
+      }
+    }
+
+    videoSelect.addEventListener("change", () => selectVideo(videoSelect.value));
+    document.getElementById("compressed-only").addEventListener("change", () => populateSelect(videoSelect.value));
+    document.getElementById("fetch-challenges").addEventListener("click", startFetch);
+    document.getElementById("refresh-videos").addEventListener("click", () => loadVideos(videoSelect.value));
+    document.getElementById("codec-mode").addEventListener("change", toggleTargetBitrateField);
+    document.getElementById("encoder").addEventListener("change", toggleEncoderFields);
+    document.getElementById("select-videos").addEventListener("click", () => {
+      selectVideos(Number(document.getElementById("select-count").value) || 5);
+    });
+    document.getElementById("video-checklist").addEventListener("change", updateSelectedCount);
+    document.getElementById("compress-btn").addEventListener("click", startCompress);
+    toggleTargetBitrateField();
+    renderX265DetailGrid();
+    loadEncodeDefaults();
+    bindSync();
+    initFetchMonitor();
+    initCompressMonitor();
+    loadVideos();
+    refreshSystem();
+    setInterval(refreshSystem, 3000);
+  </script>
+</body>
+</html>

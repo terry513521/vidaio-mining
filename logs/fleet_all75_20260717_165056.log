@@ -1,0 +1,3 @@
+[2026-07-17 16:50:56] Fleet SLA (local): 75 video(s), batch_size=5, run_id=8a055ac34496, db=work_fleet/results.db
+[2026-07-17 16:50:56] Fleet SLA (local): jobs=75 workers=5 waves=15 gpu_slots=1 deadline_per_wave=1500s final_reserve=300s probe_min=900s score_reserve=40s upload_reserve=0s
+[2026-07-17 16:50:56]   wave 1/15: jobs=['v1', 'v2', 'v3', 'v4', 'v5'] gpu=['v1'] cpu=['v2', 'v3', 'v4', 'v5'] probe_window=1200s
