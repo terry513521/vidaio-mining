@@ -1,10 +1,10 @@
 {
-  "generated_at": "2026-07-17T18:19:23.429219+00:00",
+  "generated_at": "2026-07-17T18:37:27.516317+00:00",
   "thresholds": [
     {
       "threshold": 85,
-      "job_count": 1,
-      "ok_count": 1
+      "job_count": 2,
+      "ok_count": 2
     }
   ]
 }
