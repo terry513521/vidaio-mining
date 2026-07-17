@@ -146,12 +146,21 @@ def _load_batch_by_job() -> dict[str, dict[str, Any]]:
     """Load final encoding results.
 
     Encoding writes:
-      1. per-video ``work_fleet/<job_id>/result.json`` (authoritative final payload)
+      1. per-video ``work_fleet/<threshold>/<job_id>/result.json``
+         (or legacy ``work_fleet/<job_id>/result.json``)
       2. summary ``work_fleet/batch_results.json`` (fleet-wide elapsed_sec)
 
-    Prefer per-video result.json when present.
+    Prefer per-video result.json when present. When multiple thresholds exist
+    for the same job_id, prefer the threshold from ``request.json``.
     """
     out: dict[str, dict[str, Any]] = {}
+    preferred_thr: int | None = None
+    shared = _shared_request_params()
+    if "vmaf_threshold" in shared:
+        try:
+            preferred_thr = int(shared["vmaf_threshold"])
+        except (TypeError, ValueError):
+            preferred_thr = None
 
     data = _read_json(BATCH_RESULTS)
     if isinstance(data, list):
@@ -161,10 +170,39 @@ def _load_batch_by_job() -> dict[str, dict[str, Any]]:
 
     work_root = ROOT / "work_fleet"
     if work_root.is_dir():
-        for path in sorted(work_root.glob("*/result.json")):
+        paths = list(work_root.glob("*/*/result.json")) + list(
+            work_root.glob("*/result.json")
+        )
+        # Prefer preferred-threshold results last so they win.
+        def _sort_key(path: Path) -> tuple[int, str]:
+            parent = path.parent.parent.name
+            try:
+                thr = int(parent)
+            except ValueError:
+                thr = -1
+            prefer = 1 if preferred_thr is not None and thr == preferred_thr else 0
+            return (prefer, str(path))
+
+        for path in sorted(paths, key=_sort_key):
+            # Skip legacy false-positives: work_fleet/<thr>/result.json
+            if path.parent.parent == work_root and path.parent.name.isdigit():
+                continue
             item = _read_json(path)
             if isinstance(item, dict) and item.get("job_id"):
-                out[str(item["job_id"])] = item
+                job_id = str(item["job_id"])
+                item_thr = item.get("vmaf_threshold")
+                existing = out.get(job_id)
+                if existing is None:
+                    out[job_id] = item
+                    continue
+                if preferred_thr is not None:
+                    try:
+                        if int(item_thr) == preferred_thr:
+                            out[job_id] = item
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    out[job_id] = item
     return out
 
 
@@ -367,9 +405,22 @@ def _compressed_path_for_job(job: dict[str, Any], batch: dict[str, Any] | None) 
 
     job_id = str(job.get("id") or "")
     if job_id:
+        thr = None
+        if batch and batch.get("vmaf_threshold") is not None:
+            thr = str(int(batch["vmaf_threshold"]))
+        elif job.get("vmaf_threshold") is not None:
+            thr = str(int(job["vmaf_threshold"]))
+        else:
+            shared = _shared_request_params()
+            if "vmaf_threshold" in shared:
+                try:
+                    thr = str(int(shared["vmaf_threshold"]))
+                except (TypeError, ValueError):
+                    thr = None
         for name in ("final_x265.mp4", "final_nvenc_fallback.mp4"):
-            p = ROOT / "work_fleet" / job_id / name
-            candidates.append(p)
+            if thr:
+                candidates.append(ROOT / "work_fleet" / thr / job_id / name)
+            candidates.append(ROOT / "work_fleet" / job_id / name)
 
     for path in candidates:
         if path.is_file():

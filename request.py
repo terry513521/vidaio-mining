@@ -68,6 +68,7 @@ class CompressionRequest:
     libx265_refine_sec_per_candidate: float = 90.0  # est. per-encode cost
 
     # Search / runtime
+    # 0 = unlimited (no wall-clock deadline for fleet SLA waves).
     time_budget_sec: float = 600.0
     max_search_steps: int = 8  # ABR step budget; RC uses crf_candidates
     max_recipes: int = 1
@@ -78,7 +79,7 @@ class CompressionRequest:
     # How many fleet jobs may use GPU (NVENC + libvmaf_cuda) at once; rest are CPU-only.
     fleet_gpu_slots: int = 1
     serial_cq_search: bool = False  # one CQ per round per video (set True for fleet)
-    # Hard end-to-end SLA reserves. time_budget_sec starts before download.
+    # Hard end-to-end SLA reserves. Ignored when time_budget_sec=0 (unlimited).
     download_reserve_sec: float = 25.0
     final_encode_reserve_sec: float = 90.0
     upload_reserve_sec: float = 20.0
@@ -233,8 +234,8 @@ class CompressionRequest:
             raise ValueError("fleet_batch_size must be >= 1")
         if self.fleet_gpu_slots < 0:
             raise ValueError("fleet_gpu_slots must be >= 0")
-        if self.time_budget_sec <= 0:
-            raise ValueError("time_budget_sec must be > 0")
+        if self.time_budget_sec < 0:
+            raise ValueError("time_budget_sec must be >= 0 (0 = unlimited)")
         for name in (
             "download_reserve_sec",
             "final_encode_reserve_sec",
@@ -310,7 +311,7 @@ class CompressionRequest:
             + float(self.upload_reserve_sec)
             + float(self.probe_min_budget_sec)
         )
-        if reserved > float(self.time_budget_sec):
+        if float(self.time_budget_sec) > 0 and reserved > float(self.time_budget_sec):
             raise ValueError(
                 "download/final/upload/probe reserves exceed time_budget_sec "
                 f"({reserved:.1f}s > {self.time_budget_sec:.1f}s)"

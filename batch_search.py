@@ -24,7 +24,7 @@ from crf_search import (
     search_crf,
 )
 from encoder import encode_hevc
-from fleet_io import download_to_path, seconds_left, upload_presigned_put
+from fleet_io import download_to_path, seconds_left, timeout_from_deadline, upload_presigned_put
 from interp_search import (
     apply_feature_nvenc_baseline,
     cq_seed_from_features,
@@ -79,6 +79,7 @@ class FleetVideoJob:
     proxy_path: Optional[str] = None
     chosen_crf: Optional[int] = None
     best_params: Optional[str] = None
+    vmaf_threshold: Optional[int] = None
     param_tune_trials: int = 0
     param_tune_history: list[dict[str, Any]] = field(default_factory=list)
     uploaded: bool = False
@@ -129,6 +130,7 @@ def fleet_job_final_payload(
     payload["libx265_params"] = job.best_params or (
         job.recipe.params if job.recipe else None
     )
+    payload["vmaf_threshold"] = job.vmaf_threshold
     payload["features"] = job.features
     payload["param_tune_trials"] = job.param_tune_trials
     return payload
@@ -142,6 +144,7 @@ def save_best_encode_config(job: FleetVideoJob) -> Path:
     payload: dict[str, Any] = {
         "job_id": job.job_id,
         "input_path": job.input_path,
+        "vmaf_threshold": job.vmaf_threshold,
         "crf": job.chosen_crf if job.chosen_crf is not None else (best.crf if best else None),
         "libx265_params": job.best_params
         or (job.recipe.params if job.recipe else None),
@@ -536,18 +539,47 @@ def load_fleet_jobs(
     return jobs
 
 
+def _threshold_label(req: CompressionRequest) -> str:
+    """Directory name for the active VMAF threshold (e.g. ``85``)."""
+    return str(int(req.vmaf_threshold))
+
+
+def _output_path_for_threshold(
+    output_path: str,
+    *,
+    threshold: str,
+    safe_id: str,
+) -> str:
+    """Nest delivered encodes under ``…/<threshold>/`` when not already nested."""
+    path = Path(output_path)
+    if path.parent.name == threshold:
+        return str(path)
+    return str(path.parent / threshold / path.name)
+
+
 def fleet_jobs_from_request(req: CompressionRequest) -> list[FleetVideoJob]:
-    """Materialize fleet jobs from the request JSON contract (local or remote)."""
+    """Materialize fleet jobs from the request JSON contract (local or remote).
+
+    Work/output paths are nested by ``vmaf_threshold`` so 85/89/93 runs do not
+    overwrite each other::
+
+        work_fleet/<threshold>/<job_id>/
+        output/fleet/<threshold>/<job_id>.mp4
+    """
     jobs: list[FleetVideoJob] = []
-    root = Path(req.work_dir)
+    thr = _threshold_label(req)
+    root = Path(req.work_dir) / thr
     for index, item in enumerate(req.jobs):
         job_id = item["id"] or f"video-{index + 1}"
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in job_id)
         job_dir = root / safe_id
         if item.get("input_path"):
             input_path = item["input_path"]
-            output_path = item.get("output_path") or str(
-                Path("output/fleet") / f"{safe_id}_fleet.mp4"
+            raw_out = item.get("output_path") or str(
+                Path("output/fleet") / f"{safe_id}.mp4"
+            )
+            output_path = _output_path_for_threshold(
+                raw_out, threshold=thr, safe_id=safe_id
             )
             jobs.append(
                 FleetVideoJob(
@@ -557,6 +589,7 @@ def fleet_jobs_from_request(req: CompressionRequest) -> list[FleetVideoJob]:
                     work_dir=str(job_dir),
                     crf=item.get("crf"),
                     libx265_params=item.get("libx265_params"),
+                    vmaf_threshold=int(req.vmaf_threshold),
                 )
             )
         else:
@@ -570,6 +603,7 @@ def fleet_jobs_from_request(req: CompressionRequest) -> list[FleetVideoJob]:
                     work_dir=str(job_dir),
                     crf=item.get("crf"),
                     libx265_params=item.get("libx265_params"),
+                    vmaf_threshold=int(req.vmaf_threshold),
                 )
             )
     return jobs
@@ -592,7 +626,7 @@ def _score_sla_final(
 ) -> TrialResult:
     """Score a full-file final encode: real size ratio + dual VMAF vs source."""
     started = time.monotonic()
-    timeout = max(0.1, seconds_left(deadline))
+    timeout = timeout_from_deadline(deadline, minimum=0.1)
     log(
         f"  [{job.job_id}] scoring {trial.encoder} "
         f"{format_compression(job.input_path, trial.path)} …"
@@ -771,7 +805,7 @@ def _run_fixed_crf_probe(
         crf=fixed_crf,
         bitrate=None,
         ffmpeg_bin=req.ffmpeg_bin,
-        timeout=max(1.0, seconds_left(probe_deadline)),
+        timeout=timeout_from_deadline(probe_deadline),
         encoder="libx265",
         preprocess=req.preprocess,
         libx265_profile=req.libx265_profile,
@@ -796,7 +830,7 @@ def _run_fixed_crf_probe(
         vmaf_docker_image=req.vmaf_docker_image,
         vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
         codec_mode=req.codec_mode,
-        timeout=max(1.0, seconds_left(probe_deadline)),
+        timeout=timeout_from_deadline(probe_deadline),
     )
     job.stage_timings["crf_search"] = time.monotonic() - probe_started
     if (
@@ -906,7 +940,7 @@ def _run_param_tune_after_crf(
             crf=int(crf),
             bitrate=None,
             ffmpeg_bin=req.ffmpeg_bin,
-            timeout=max(1.0, seconds_left(probe_deadline)),
+            timeout=timeout_from_deadline(probe_deadline),
             encoder="libx265",
             preprocess=req.preprocess,
             libx265_profile=req.libx265_profile,
@@ -933,7 +967,7 @@ def _run_param_tune_after_crf(
             vmaf_docker_image=req.vmaf_docker_image,
             vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
             codec_mode=req.codec_mode,
-            timeout=max(1.0, seconds_left(probe_deadline)),
+            timeout=timeout_from_deadline(probe_deadline),
         )
         if (
             score.vmaf <= 0
@@ -1105,7 +1139,7 @@ def _run_scene_crf_probe(
                 crf=int(crf_key),
                 bitrate=None,
                 ffmpeg_bin=req.ffmpeg_bin,
-                timeout=max(1.0, seconds_left(probe_deadline)),
+                timeout=timeout_from_deadline(probe_deadline),
                 encoder="libx265",
                 preprocess=req.preprocess,
                 libx265_profile=req.libx265_profile,
@@ -1143,7 +1177,7 @@ def _run_scene_crf_probe(
                 vmaf_docker_image=req.vmaf_docker_image,
                 vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
                 codec_mode=req.codec_mode,
-                timeout=max(1.0, seconds_left(probe_deadline)),
+                timeout=timeout_from_deadline(probe_deadline),
             )
             scored_cache[crf_key] = score
         if (
@@ -1310,7 +1344,7 @@ def _run_sla_probe(
         str(proxy_path),
         windows,
         ffmpeg_bin=req.ffmpeg_bin,
-        timeout=max(1.0, seconds_left(probe_deadline)),
+        timeout=timeout_from_deadline(probe_deadline),
         deadline=probe_deadline,
     )
     job.stage_timings["proxy"] = time.monotonic() - proxy_started
@@ -1332,7 +1366,7 @@ def _run_sla_probe(
             reference_path=built.path,
             crf=crf,
             bitrate=None,
-            timeout=max(1.0, seconds_left(probe_deadline)),
+            timeout=timeout_from_deadline(probe_deadline),
             stage="sla_proxy_probe",
             vmaf_n_subsample=req.vmaf_n_subsample,
             encoder="libx265",
@@ -1389,7 +1423,7 @@ def _encode_sla_candidate(
         crf=crf,
         bitrate=None,
         ffmpeg_bin=req.ffmpeg_bin,
-        timeout=max(0.1, seconds_left(final_deadline)),
+        timeout=timeout_from_deadline(final_deadline, minimum=0.1),
         encoder=encoder_name,
         preprocess=req.preprocess,
         libx265_profile=req.libx265_profile if encoder_name == "libx265" else None,
@@ -1428,7 +1462,7 @@ def _encode_sla_candidate(
     validation = validate_hevc_output(
         str(output_path),
         req.ffprobe_bin,
-        timeout=max(0.1, seconds_left(final_deadline)),
+        timeout=timeout_from_deadline(final_deadline, minimum=0.1),
     )
     return TrialResult(
         recipe=recipe.name,
@@ -1571,7 +1605,7 @@ def _finalize_and_upload_sla_job(
 
         # One full dual-VMAF + real size compression against the source file.
         score_started = time.monotonic()
-        if seconds_left(overall_deadline) < 5.0:
+        if overall_deadline is not None and seconds_left(overall_deadline) < 5.0:
             job.error = "insufficient budget for final dual-VMAF score"
             return
         scored = _score_sla_final(req, job, chosen, deadline=overall_deadline)
@@ -1614,11 +1648,11 @@ def _run_sla_job(
     template: CompressionRequest,
     job: FleetVideoJob,
     *,
-    download_deadline: float,
-    preparation_deadline: float,
-    probe_deadline: float,
-    final_deadline: float,
-    overall_deadline: float,
+    download_deadline: Optional[float],
+    preparation_deadline: Optional[float],
+    probe_deadline: Optional[float],
+    final_deadline: Optional[float],
+    overall_deadline: Optional[float],
     run_id: Optional[str] = None,
     results_db_path: Optional[str] = None,
 ) -> None:
@@ -1661,8 +1695,9 @@ def run_fleet_sla(
 ) -> list[SearchResult]:
     """Fleet SLA: libx265 CRF search → param tune → dual VMAF → results.
 
-    Jobs are processed in waves of ``fleet_batch_size``. Each wave gets a fresh
-    ``time_budget_sec`` so a large catalog does not starve later videos.
+    Jobs are processed in waves of ``fleet_batch_size``. When
+    ``time_budget_sec > 0``, each wave gets that budget. When
+    ``time_budget_sec == 0``, there is no wall-clock deadline.
     """
     if template.skip_transfer or all(not j.input_url for j in jobs):
         template.skip_transfer = True
@@ -1670,37 +1705,36 @@ def run_fleet_sla(
         template.upload_reserve_sec = 0.0
 
     run_started = time.monotonic()
-    # Full-file CRF probes already dual-VMAF and are reused as final when possible,
-    # so final_encode_reserve is mostly copy/upload headroom — not a second encode.
-    final_reserve = max(0.0, float(template.final_encode_reserve_sec))
-    upload_reserve = max(0.0, float(template.upload_reserve_sec))
-    probe_min = max(1.0, float(template.probe_min_budget_sec))
-    prepare_floor = 45.0  # feature extract needs wall time on 4K clips
-    available = float(template.time_budget_sec) - upload_reserve
-    # Keep reserves feasible: prepare + probe_min + final_reserve <= budget.
-    if final_reserve + probe_min + prepare_floor > available:
-        # Prefer giving probe+prepare the budget; shrink final reserve first.
-        final_reserve = max(20.0, available - probe_min - prepare_floor)
-        if final_reserve + probe_min + prepare_floor > available:
-            probe_min = max(30.0, available - final_reserve - prepare_floor)
-        log(
-            f"  budget clamp: final_reserve={final_reserve:.0f}s "
-            f"probe_min={probe_min:.0f}s prepare_floor={prepare_floor:.0f}s "
-            f"(from time_budget={template.time_budget_sec:.0f}s)"
-        )
+    unlimited = float(template.time_budget_sec) <= 0
+    final_reserve = 0.0 if unlimited else max(0.0, float(template.final_encode_reserve_sec))
+    upload_reserve = 0.0 if unlimited else max(0.0, float(template.upload_reserve_sec))
+    probe_min = 0.0 if unlimited else max(0.0, float(template.probe_min_budget_sec))
+    final_score_reserve_sec = 0.0
+    if not unlimited:
+        prepare_floor = 0.0 if final_reserve <= 0 and probe_min <= 0 else 45.0
+        available = float(template.time_budget_sec) - upload_reserve
+        if prepare_floor > 0 and final_reserve + probe_min + prepare_floor > available:
+            final_reserve = max(0.0, available - probe_min - prepare_floor)
+            if final_reserve + probe_min + prepare_floor > available:
+                probe_min = max(0.0, available - final_reserve - prepare_floor)
+            log(
+                f"  budget clamp: final_reserve={final_reserve:.0f}s "
+                f"probe_min={probe_min:.0f}s prepare_floor={prepare_floor:.0f}s "
+                f"(from time_budget={template.time_budget_sec:.0f}s)"
+            )
+        if final_reserve > 0:
+            final_score_reserve_sec = min(40.0, max(20.0, final_reserve * 0.35))
     template.final_encode_reserve_sec = final_reserve
     template.probe_min_budget_sec = probe_min
-    # Keep headroom after final encode for one dual-VMAF pass on the winner
-    # (only used when probe encode is not reused).
-    final_score_reserve_sec = min(40.0, max(20.0, final_reserve * 0.35))
 
     workers = max(1, min(template.fleet_batch_size, len(jobs)))
     mode = "local" if template.skip_transfer else "http"
     wave_count = (len(jobs) + workers - 1) // workers
+    budget_txt = "unlimited" if unlimited else f"{template.time_budget_sec:.0f}s"
     log(
         f"Fleet SLA ({mode}): jobs={len(jobs)} workers={workers} "
         f"waves={wave_count} gpu_slots={template.fleet_gpu_slots} "
-        f"deadline_per_wave={template.time_budget_sec:.0f}s "
+        f"deadline_per_wave={budget_txt} "
         f"final_reserve={final_reserve:.0f}s "
         f"probe_min={probe_min:.0f}s "
         f"score_reserve={final_score_reserve_sec:.0f}s "
@@ -1710,21 +1744,32 @@ def run_fleet_sla(
     for wave_idx in range(wave_count):
         wave = jobs[wave_idx * workers : (wave_idx + 1) * workers]
         assign_fleet_gpu_slots(wave, template.fleet_gpu_slots)
-        wave_started = time.monotonic()
-        overall_deadline = wave_started + float(template.time_budget_sec)
-        probe_deadline = overall_deadline - (final_reserve + upload_reserve)
-        download_deadline = min(
-            wave_started + max(0.0, template.download_reserve_sec),
-            probe_deadline - probe_min,
-        )
-        preparation_deadline = probe_deadline - probe_min
-        final_deadline = overall_deadline - upload_reserve - final_score_reserve_sec
+        if unlimited:
+            overall_deadline = None
+            probe_deadline = None
+            download_deadline = None
+            preparation_deadline = None
+            final_deadline = None
+            probe_window_txt = "unlimited"
+        else:
+            wave_started = time.monotonic()
+            overall_deadline = wave_started + float(template.time_budget_sec)
+            probe_deadline = overall_deadline - (final_reserve + upload_reserve)
+            download_deadline = min(
+                wave_started + max(0.0, template.download_reserve_sec),
+                probe_deadline - probe_min if probe_min > 0 else probe_deadline,
+            )
+            preparation_deadline = (
+                probe_deadline - probe_min if probe_min > 0 else probe_deadline
+            )
+            final_deadline = overall_deadline - upload_reserve - final_score_reserve_sec
+            probe_window_txt = f"{max(0.0, probe_deadline - wave_started):.0f}s"
         gpu_jobs = [j.job_id for j in wave if j.use_gpu]
         cpu_jobs = [j.job_id for j in wave if not j.use_gpu]
         log(
             f"  wave {wave_idx + 1}/{wave_count}: jobs={[j.job_id for j in wave]} "
             f"gpu={gpu_jobs or '-'} cpu={cpu_jobs or '-'} "
-            f"probe_window={max(0.0, probe_deadline - wave_started):.0f}s"
+            f"probe_window={probe_window_txt}"
         )
         with ThreadPoolExecutor(max_workers=len(wave)) as pool:
             futures = [

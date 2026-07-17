@@ -22,12 +22,32 @@ class TransferResult:
     url: str = ""
 
 
-def seconds_left(deadline: float) -> float:
-    """Remaining seconds for a monotonic absolute deadline."""
+def seconds_left(deadline: Optional[float]) -> float:
+    """Remaining seconds for a monotonic absolute deadline.
+
+    ``None`` means no deadline (unlimited).
+    """
+    if deadline is None:
+        return float("inf")
     return max(0.0, float(deadline) - time.monotonic())
 
 
-def _timeout(deadline: float, *, minimum: float = 0.1) -> float:
+def timeout_from_deadline(
+    deadline: Optional[float],
+    *,
+    minimum: float = 1.0,
+) -> Optional[float]:
+    """Subprocess/API timeout derived from a deadline; ``None`` = no limit."""
+    if deadline is None:
+        return None
+    left = seconds_left(deadline)
+    return max(float(minimum), left)
+
+
+def _timeout(deadline: Optional[float], *, minimum: float = 0.1) -> float:
+    if deadline is None:
+        # Callers that require a concrete timeout should use timeout_from_deadline.
+        return max(minimum, 365.0 * 24.0 * 3600.0)
     left = seconds_left(deadline)
     if left <= 0:
         raise TimeoutError("end-to-end deadline exhausted")

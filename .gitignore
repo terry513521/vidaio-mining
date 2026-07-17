@@ -1,1 +1,11 @@
 work_01249124/
+venv/
+work/
+work_fast/
+output/
+eval_samples/
+__pycache__/
+logs/
+work_fleet/
+*.mp4
+!published_results/
