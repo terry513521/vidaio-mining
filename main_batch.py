@@ -84,14 +84,23 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     mode = "local" if template.skip_transfer else "http"
+    codec_txt = (
+        f"ABR/{template.target_bitrate}"
+        if template.is_abr
+        else "RC/CRF"
+    )
     run_id = start_run(
         db_path=args.results_db,
         request_path=args.request,
         work_root=args.work_root,
-        strategy="fleet_sla_x265_full_crf",
+        strategy=(
+            "fleet_sla_x265_fixed_vbr"
+            if template.is_abr
+            else "fleet_sla_x265_full_crf"
+        ),
     )
     log(
-        f"Fleet SLA ({mode}): {len(jobs)} video(s), "
+        f"Fleet SLA ({mode}, {codec_txt}): {len(jobs)} video(s), "
         f"batch_size={template.fleet_batch_size}, run_id={run_id}, "
         f"db={args.results_db}"
     )

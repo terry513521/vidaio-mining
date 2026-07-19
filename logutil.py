@@ -14,4 +14,9 @@ def log(msg: str = "", *args: Any, **kwargs: Any) -> None:
     """Print a message prefixed with local wall-clock time."""
     if args:
         msg = msg % args if "%" in msg else " ".join((msg, *(str(a) for a in args)))
-    print(f"[{ts()}] {msg}", **kwargs)
+    line = f"[{ts()}] {msg}"
+    try:
+        print(line, **kwargs)
+    except UnicodeEncodeError:
+        # Windows consoles often use a legacy code page (e.g. cp1252).
+        print(line.encode("ascii", "replace").decode("ascii"), **kwargs)

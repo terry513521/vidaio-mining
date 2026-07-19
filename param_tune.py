@@ -1,7 +1,8 @@
-"""Sequential libx265 param tuning after CRF search (maximize s_f).
+"""Sequential libx265 param tuning after CRF/bitrate probe (maximize s_f).
 
 Order: aq-mode → aq-strength → rd → ref → bframes → rc-lookahead.
-After each key, optionally try CRF+1 when VMAF headroom ≥ threshold.
+After each key, optionally try CRF+1 when VMAF headroom ≥ threshold
+(RC mode only; ABR keeps bitrate fixed).
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ class ParamTuneState:
     s_f: float
     vmaf: float
     path: str = ""
+    bitrate: Optional[str] = None
     trials: int = 0
     no_improve_streak: int = 0
     history: list[dict[str, Any]] = None  # type: ignore[assignment]
@@ -184,6 +186,7 @@ class TuneTrialResult:
     vmaf: float = 0.0
     path: str = ""
     reason: str = ""
+    bitrate: Optional[str] = None
 
 
 EvaluateFn = Callable[[int, str], TuneTrialResult]
@@ -205,12 +208,17 @@ def run_param_tune_loop(
     vmaf_headroom: float = 2.0,
     keys: Sequence[str] = PARAM_TUNE_KEYS,
     max_rounds: int = 3,
+    bitrate: Optional[str] = None,
+    allow_crf_bump: bool = True,
 ) -> ParamTuneState:
     """Multi-round sequential param tune; maximize ``s_f``.
 
     ``evaluate(crf, params)`` must encode+score and return ``TuneTrialResult``.
     The initial (crf, params) is assumed already scored and counts as trial 0
     (not against the budget).
+
+    When ``bitrate`` is set (ABR), CRF is ignored by the caller encode path and
+    ``allow_crf_bump`` should be False so bitrate stays fixed.
     """
     state = ParamTuneState(
         crf=int(initial_crf),
@@ -218,23 +226,29 @@ def run_param_tune_loop(
         s_f=float(initial_s_f),
         vmaf=float(initial_vmaf),
         path=str(initial_path or ""),
+        bitrate=str(bitrate) if bitrate else None,
     )
-    seen: set[tuple[int, str]] = {(state.crf, state.params)}
+    # ABR: dedupe by (bitrate, params); RC: by (crf, params).
+    if state.bitrate:
+        seen: set[tuple[Any, str]] = {(state.bitrate, state.params)}
+    else:
+        seen = {(state.crf, state.params)}
 
     def _accept(trial: TuneTrialResult, *, label: str) -> bool:
         state.trials += 1
-        state.history.append(
-            {
-                "trial": state.trials,
-                "label": label,
-                "crf": trial.crf,
-                "params": trial.params,
-                "s_f": trial.s_f,
-                "vmaf": trial.vmaf,
-                "ok": trial.ok,
-                "reason": trial.reason,
-            }
-        )
+        entry: dict[str, Any] = {
+            "trial": state.trials,
+            "label": label,
+            "crf": trial.crf,
+            "params": trial.params,
+            "s_f": trial.s_f,
+            "vmaf": trial.vmaf,
+            "ok": trial.ok,
+            "reason": trial.reason,
+        }
+        if state.bitrate is not None:
+            entry["bitrate"] = trial.bitrate or state.bitrate
+        state.history.append(entry)
         if not trial.ok:
             state.no_improve_streak += 1
             return False
@@ -244,6 +258,8 @@ def run_param_tune_loop(
             state.s_f = trial.s_f
             state.vmaf = trial.vmaf
             state.path = trial.path or state.path
+            if trial.bitrate:
+                state.bitrate = trial.bitrate
             state.no_improve_streak = 0
             return True
         state.no_improve_streak += 1
@@ -253,7 +269,9 @@ def run_param_tune_loop(
         return state.trials < max_trials and state.no_improve_streak < no_improve_stop
 
     def _try(crf: int, params: str, label: str) -> bool:
-        key = (int(crf), str(params))
+        key: tuple[Any, str] = (
+            (state.bitrate, str(params)) if state.bitrate else (int(crf), str(params))
+        )
         if key in seen:
             return False
         if not _budget_ok():
@@ -262,9 +280,13 @@ def run_param_tune_loop(
         trial = evaluate(int(crf), str(params))
         trial.crf = int(crf)
         trial.params = str(params)
+        if state.bitrate and not trial.bitrate:
+            trial.bitrate = state.bitrate
         return _accept(trial, label=label)
 
     def _maybe_crf_bump(label_prefix: str) -> None:
+        if not allow_crf_bump or state.bitrate:
+            return
         if not _budget_ok():
             return
         if not should_try_crf_bump(
@@ -290,12 +312,12 @@ def run_param_tune_loop(
             for cand in cands:
                 if not _budget_ok():
                     break
-                # Skip the value already active (already scored at this CRF).
+                # Skip the value already active (already scored at this CRF/bitrate).
                 if _same_param_value(cand, current_val):
                     continue
                 new_params = set_param(state.params, key, cand)
                 _try(state.crf, new_params, f"r{round_idx}:{key}={cand}")
-            # After finishing this key's candidates, optional CRF bump.
+            # After finishing this key's candidates, optional CRF bump (RC only).
             _maybe_crf_bump(f"r{round_idx}:{key}")
         # Outer plateau: no s_f gain across a full key pass.
         if state.s_f <= round_best_s_f + 1e-9:

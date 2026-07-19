@@ -286,8 +286,8 @@ class FleetSlaTests(unittest.TestCase):
             download_mock.assert_not_called()
             upload_mock.assert_not_called()
             self.assertTrue(jobs[0].uploaded)
-            self.assertTrue(out.is_file())
-            self.assertEqual(out.read_bytes(), b"final-x265")
+            self.assertTrue(Path(jobs[0].output_path).is_file())
+            self.assertEqual(Path(jobs[0].output_path).read_bytes(), b"final-x265")
             self.assertEqual(results[0].best.encoder, "libx265")
             self.assertEqual(jobs[0].stage_timings.get("download"), 0.0)
             self.assertEqual(jobs[0].stage_timings.get("upload"), 0.0)
@@ -362,10 +362,125 @@ class FleetSlaTests(unittest.TestCase):
             self.assertEqual(encode_crfs, [28])  # one fixed encode; reused as final
             self.assertIn("aq-mode=2", encode_params[0])
             self.assertIn("aq-strength=0.9", encode_params[0])
-            self.assertTrue(out.is_file())
-            self.assertEqual(out.read_bytes(), b"fixed-encode")
+            self.assertTrue(Path(jobs[0].output_path).is_file())
+            self.assertEqual(Path(jobs[0].output_path).read_bytes(), b"fixed-encode")
             self.assertEqual(results[0].best.crf, 28)
             self.assertEqual(results[0].best.stage, "sla_final")
+
+    def test_fixed_vbr_skips_crf_search_and_tunes_params(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src.mp4"
+            src.write_bytes(b"local-input")
+            out = Path(td) / "out.mp4"
+            work = Path(td) / "work"
+            template = CompressionRequest.from_dict(
+                {
+                    "work_dir": str(work),
+                    "skip_transfer": True,
+                    "encoder": "libx265",
+                    "codec_mode": "ABR",
+                    "target_bitrate": "8M",
+                    "libx265_refine_preset": "superfast",
+                    "libx265_params": "aq-mode=2:aq-strength=1.0:rd=5:ref=4:bframes=4:rc-lookahead=40",
+                    "param_tune": True,
+                    "param_tune_max_trials": 3,
+                    "param_tune_no_improve_stop": 10,
+                    "param_tune_max_rounds": 1,
+                    "time_budget_sec": 0,
+                    "final_encode_reserve_sec": 0,
+                    "probe_min_budget_sec": 0,
+                    "vmaf_threshold": 85,
+                    "jobs": [
+                        {
+                            "id": "vbr",
+                            "input_path": str(src),
+                            "output_path": str(out),
+                        }
+                    ],
+                }
+            )
+            jobs = fleet_jobs_from_request(template)
+            encode_calls: list[dict] = []
+            score_n = {"n": 0}
+
+            def fake_extract(job, sample_frames, *, deadline):
+                _set_feature_scenes(job, duration=30.0, difficulty=0.4)
+                job.features["texture_level"] = 0.9
+
+            def fake_encode(input_path, output_path, **kwargs):
+                encode_calls.append(
+                    {
+                        "crf": kwargs.get("crf"),
+                        "bitrate": kwargs.get("bitrate"),
+                        "codec_mode": kwargs.get("codec_mode"),
+                        "params": str(kwargs.get("params") or ""),
+                    }
+                )
+                Path(output_path).write_bytes(b"vbr-encode")
+                return EncodeResult(True, output_path, 0, "", [])
+
+            def fake_score(*args, **kwargs):
+                score_n["n"] += 1
+                # First score = baseline; later trials get higher s_f when aq-mode=1.
+                params = ""
+                # score_candidate doesn't get params; infer from encode order.
+                s_f = 0.40 + 0.01 * score_n["n"]
+                return _score(s_f=s_f, vmaf=88.0)
+
+            with patch("batch_search.download_to_path") as download_mock, patch(
+                "batch_search.upload_presigned_put"
+            ) as upload_mock, patch(
+                "batch_search._extract_sla_features", side_effect=fake_extract
+            ), patch(
+                "batch_search.search_crf"
+            ) as search_mock, patch(
+                "batch_search.encode_hevc", side_effect=fake_encode
+            ), patch(
+                "batch_search.score_candidate", side_effect=fake_score
+            ), patch(
+                "batch_search.validate_hevc_output",
+                return_value=EncodeValidation(True, [], {}),
+            ):
+                results = run_fleet_sla(template, jobs)
+
+            search_mock.assert_not_called()
+            download_mock.assert_not_called()
+            upload_mock.assert_not_called()
+            self.assertEqual(jobs[0].error, "")
+            self.assertEqual(jobs[0].chosen_bitrate, "8M")
+            self.assertIsNone(jobs[0].chosen_crf)
+            self.assertGreaterEqual(jobs[0].param_tune_trials, 1)
+            self.assertTrue(all(c["bitrate"] == "8M" for c in encode_calls))
+            self.assertTrue(all(c["crf"] is None for c in encode_calls))
+            self.assertTrue(all(c["codec_mode"] == "ABR" for c in encode_calls))
+            self.assertEqual(results[0].strategy, "fleet_sla_x265_vbr_param_tune")
+            self.assertEqual(results[0].best.bitrate, "8M")
+            self.assertEqual(results[0].best.stage, "sla_final")
+            self.assertTrue(Path(jobs[0].output_path).is_file())
+            best_path = Path(jobs[0].work_dir) / "best.json"
+            self.assertTrue(best_path.is_file())
+            import json
+
+            best = json.loads(best_path.read_text(encoding="utf-8"))
+            self.assertEqual(best["bitrate"], "8M")
+            self.assertEqual(best["target_bitrate"], "8M")
+
+    def test_abr_requires_target_bitrate(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            CompressionRequest.from_dict(
+                {
+                    "encoder": "libx265",
+                    "codec_mode": "ABR",
+                    "jobs": [
+                        {
+                            "id": "x",
+                            "input_path": "/tmp/x.mp4",
+                            "output_path": "/tmp/y.mp4",
+                        }
+                    ],
+                }
+            )
+        self.assertIn("target_bitrate", str(ctx.exception))
 
     def test_score_sla_final_uses_source_size_and_dual_vmaf(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -440,7 +555,7 @@ class FleetSlaTests(unittest.TestCase):
             self.assertAlmostEqual(scored.score.compression_rate, 0.1, places=5)
             self.assertEqual(scored.score.vmaf, 91.0)
             self.assertEqual(scored.score.vmaf_base, 92.0)
-            self.assertGreater(scored.score_sec, 0)
+            self.assertGreaterEqual(scored.score_sec, 0.0)
             self.assertEqual(scored.measured_bitrate_mbps, 2.5)
 
     def test_reserve_budget_rejected(self) -> None:

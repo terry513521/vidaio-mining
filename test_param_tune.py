@@ -109,6 +109,48 @@ class ParamTuneLoopTests(unittest.TestCase):
         self.assertGreaterEqual(state.no_improve_streak, 3)
         self.assertEqual(state.s_f, 0.40)
 
+    def test_allow_crf_bump_false_keeps_bitrate_fixed(self) -> None:
+        base = "aq-mode=2:aq-strength=1.0:rd=5:ref=4:bframes=4:rc-lookahead=40"
+        calls: list[tuple[int, str]] = []
+
+        def evaluate(crf: int, params: str) -> TuneTrialResult:
+            calls.append((crf, params))
+            s_f = 0.50 if "aq-mode=1" in params else 0.40
+            return TuneTrialResult(
+                ok=True,
+                crf=crf,
+                params=params,
+                bitrate="8M",
+                s_f=s_f,
+                vmaf=90.0,
+                path="/tmp/vbr.mp4",
+            )
+
+        state = run_param_tune_loop(
+            initial_crf=0,
+            initial_params=base,
+            initial_s_f=0.40,
+            initial_vmaf=90.0,
+            initial_path="/tmp/vbr.mp4",
+            features={"texture_level": 0.9},
+            evaluate=evaluate,
+            vmaf_threshold=85.0,
+            crf_max=42,
+            max_trials=10,
+            no_improve_stop=10,
+            vmaf_headroom=2.0,
+            keys=("aq-mode",),
+            max_rounds=1,
+            bitrate="8M",
+            allow_crf_bump=False,
+        )
+        self.assertEqual(state.bitrate, "8M")
+        self.assertIn("aq-mode=1", state.params)
+        self.assertTrue(all(c[0] == 0 for c in calls))
+        self.assertTrue(all(h.get("bitrate") == "8M" for h in state.history))
+        # No CRF+1 labels when bump disabled.
+        self.assertFalse(any("crf+1" in str(h.get("label")) for h in state.history))
+
 
 if __name__ == "__main__":
     unittest.main()
