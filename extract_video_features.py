@@ -7,8 +7,8 @@ Level 3 — distribution statistics (max, p95, variance, ratios, histogram)
 
 Examples:
   python extract_video_features.py
-  python extract_video_features.py --input /root/terry/videos --out /root/terry/videos/features
-  python extract_video_features.py --input /root/terry/videos --limit 5 --force
+  python extract_video_features.py --input /ephemeral/videos --out /ephemeral/videos/features
+  python extract_video_features.py --input /ephemeral/videos --limit 5 --force
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ import numpy as np
 from feature_extractor import HEVCFeatureExtractor
 
 ROOT = Path(__file__).resolve().parent
-DEFAULT_INPUT = Path("/root/terry/videos")
+DEFAULT_INPUT = Path("/ephemeral/videos")
 DEFAULT_OUT = DEFAULT_INPUT / "features"
 
 # Metrics aggregated across segments for Level 3.

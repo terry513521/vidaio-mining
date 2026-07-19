@@ -35,7 +35,8 @@ class CompressionRequest:
     # Fleet job list. Each entry is either:
     #   remote: {id, input_url, upload_url}  (presigned HTTP PUT)
     #   local:  {id, input_path, output_path?}
-    # Optional per-job overrides: crf, libx265_params.
+    # Optional per-job overrides: crf, libx265_params, target_bitrate,
+    # target_compression_rate.
     jobs: list[dict[str, Any]] = field(default_factory=list)
     # Local testing: skip HTTP download/upload even if URL fields exist.
     skip_transfer: bool = False
@@ -47,6 +48,12 @@ class CompressionRequest:
     # Aliases: CRF/CQ → RC; VBR/BITRATE → ABR. NVENC rate-control flag is nvenc_rc.
     codec_mode: str = "RC"  # RC | ABR
     target_bitrate: Optional[str] = None  # e.g. "8M" when ABR
+    # When ABR and target_bitrate is unset: derive -b:v so expected
+    # compression_rate ≈ this value (e.g. 0.035). Per-job override allowed.
+    target_compression_rate: Optional[float] = None
+    # After VBR probe+tune, if VMAF < threshold (or score unusable), fall back
+    # to the CRF search path for that job.
+    vbr_fallback_to_crf: bool = True
 
     # Encoder backend: CPU libx265 or GPU hevc_nvenc
     encoder: str = "libx265"  # libx265 | hevc_nvenc
@@ -207,8 +214,34 @@ class CompressionRequest:
             if not (0 < self.vmaf_threshold <= 100):
                 raise ValueError(f"vmaf_threshold out of range: {self.vmaf_threshold}")
 
-        if self.codec_mode == "ABR" and not self.target_bitrate:
-            raise ValueError("target_bitrate is required when codec_mode=ABR")
+        if self.codec_mode == "ABR":
+            if self.target_bitrate is not None:
+                self.target_bitrate = str(self.target_bitrate).strip() or None
+            if self.target_compression_rate is not None:
+                rate = float(self.target_compression_rate)
+                if not (0.0 < rate < 1.0):
+                    raise ValueError(
+                        "target_compression_rate must be in (0, 1), "
+                        f"got {self.target_compression_rate!r}"
+                    )
+                self.target_compression_rate = rate
+            job_has_bitrate = any(
+                isinstance(j, dict)
+                and (
+                    str(j.get("target_bitrate") or "").strip()
+                    or j.get("target_compression_rate") is not None
+                )
+                for j in (self.jobs or [])
+            )
+            if (
+                not self.target_bitrate
+                and self.target_compression_rate is None
+                and not job_has_bitrate
+            ):
+                raise ValueError(
+                    "ABR/VBR requires target_bitrate, target_compression_rate, "
+                    "or a per-job bitrate/rate override"
+                )
 
         if self.crf_min > self.crf_max:
             raise ValueError("crf_min must be <= crf_max")
@@ -264,6 +297,18 @@ class CompressionRequest:
                 params = str(params).strip()
                 if params:
                     overrides["libx265_params"] = params
+            job_bitrate = raw.get("target_bitrate", raw.get("bitrate"))
+            if job_bitrate is not None:
+                job_bitrate = str(job_bitrate).strip()
+                if job_bitrate:
+                    overrides["target_bitrate"] = job_bitrate
+            if raw.get("target_compression_rate") is not None:
+                job_rate = float(raw["target_compression_rate"])
+                if not (0.0 < job_rate < 1.0):
+                    raise ValueError(
+                        f"jobs[{index}].target_compression_rate must be in (0, 1)"
+                    )
+                overrides["target_compression_rate"] = job_rate
             has_remote = bool(input_url or upload_url)
             has_local = bool(input_path)
             if has_remote and has_local:

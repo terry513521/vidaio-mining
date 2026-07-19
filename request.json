@@ -3,377 +3,377 @@
   "jobs": [
     {
       "id": "v1",
-      "input_path": "/root/terry/videos/1.mp4",
+      "input_path": "/ephemeral/videos/1.mp4",
       "output_path": "./output/fleet/v1.mp4"
     },
     {
       "id": "v2",
-      "input_path": "/root/terry/videos/2.mp4",
+      "input_path": "/ephemeral/videos/2.mp4",
       "output_path": "./output/fleet/v2.mp4"
     },
     {
       "id": "v3",
-      "input_path": "/root/terry/videos/3.mp4",
+      "input_path": "/ephemeral/videos/3.mp4",
       "output_path": "./output/fleet/v3.mp4"
     },
     {
       "id": "v4",
-      "input_path": "/root/terry/videos/4.mp4",
+      "input_path": "/ephemeral/videos/4.mp4",
       "output_path": "./output/fleet/v4.mp4"
     },
     {
       "id": "v5",
-      "input_path": "/root/terry/videos/5.mp4",
+      "input_path": "/ephemeral/videos/5.mp4",
       "output_path": "./output/fleet/v5.mp4"
     },
     {
       "id": "v6",
-      "input_path": "/root/terry/videos/6.mp4",
+      "input_path": "/ephemeral/videos/6.mp4",
       "output_path": "./output/fleet/v6.mp4"
     },
     {
       "id": "v7",
-      "input_path": "/root/terry/videos/7.mp4",
+      "input_path": "/ephemeral/videos/7.mp4",
       "output_path": "./output/fleet/v7.mp4"
     },
     {
       "id": "v8",
-      "input_path": "/root/terry/videos/8.mp4",
+      "input_path": "/ephemeral/videos/8.mp4",
       "output_path": "./output/fleet/v8.mp4"
     },
     {
       "id": "v9",
-      "input_path": "/root/terry/videos/9.mp4",
+      "input_path": "/ephemeral/videos/9.mp4",
       "output_path": "./output/fleet/v9.mp4"
     },
     {
       "id": "v10",
-      "input_path": "/root/terry/videos/10.mp4",
+      "input_path": "/ephemeral/videos/10.mp4",
       "output_path": "./output/fleet/v10.mp4"
     },
     {
       "id": "v11",
-      "input_path": "/root/terry/videos/11.mp4",
+      "input_path": "/ephemeral/videos/11.mp4",
       "output_path": "./output/fleet/v11.mp4"
     },
     {
       "id": "v12",
-      "input_path": "/root/terry/videos/12.mp4",
+      "input_path": "/ephemeral/videos/12.mp4",
       "output_path": "./output/fleet/v12.mp4"
     },
     {
       "id": "v13",
-      "input_path": "/root/terry/videos/13.mp4",
+      "input_path": "/ephemeral/videos/13.mp4",
       "output_path": "./output/fleet/v13.mp4"
     },
     {
       "id": "v14",
-      "input_path": "/root/terry/videos/14.mp4",
+      "input_path": "/ephemeral/videos/14.mp4",
       "output_path": "./output/fleet/v14.mp4"
     },
     {
       "id": "v15",
-      "input_path": "/root/terry/videos/15.mp4",
+      "input_path": "/ephemeral/videos/15.mp4",
       "output_path": "./output/fleet/v15.mp4"
     },
     {
       "id": "v16",
-      "input_path": "/root/terry/videos/16.mp4",
+      "input_path": "/ephemeral/videos/16.mp4",
       "output_path": "./output/fleet/v16.mp4"
     },
     {
       "id": "v17",
-      "input_path": "/root/terry/videos/17.mp4",
+      "input_path": "/ephemeral/videos/17.mp4",
       "output_path": "./output/fleet/v17.mp4"
     },
     {
       "id": "v18",
-      "input_path": "/root/terry/videos/18.mp4",
+      "input_path": "/ephemeral/videos/18.mp4",
       "output_path": "./output/fleet/v18.mp4"
     },
     {
       "id": "v19",
-      "input_path": "/root/terry/videos/19.mp4",
+      "input_path": "/ephemeral/videos/19.mp4",
       "output_path": "./output/fleet/v19.mp4"
     },
     {
       "id": "v20",
-      "input_path": "/root/terry/videos/20.mp4",
+      "input_path": "/ephemeral/videos/20.mp4",
       "output_path": "./output/fleet/v20.mp4"
     },
     {
       "id": "v21",
-      "input_path": "/root/terry/videos/21.mp4",
+      "input_path": "/ephemeral/videos/21.mp4",
       "output_path": "./output/fleet/v21.mp4"
     },
     {
       "id": "v22",
-      "input_path": "/root/terry/videos/22.mp4",
+      "input_path": "/ephemeral/videos/22.mp4",
       "output_path": "./output/fleet/v22.mp4"
     },
     {
       "id": "v23",
-      "input_path": "/root/terry/videos/23.mp4",
+      "input_path": "/ephemeral/videos/23.mp4",
       "output_path": "./output/fleet/v23.mp4"
     },
     {
       "id": "v24",
-      "input_path": "/root/terry/videos/24.mp4",
+      "input_path": "/ephemeral/videos/24.mp4",
       "output_path": "./output/fleet/v24.mp4"
     },
     {
       "id": "v25",
-      "input_path": "/root/terry/videos/25.mp4",
+      "input_path": "/ephemeral/videos/25.mp4",
       "output_path": "./output/fleet/v25.mp4"
     },
     {
       "id": "v26",
-      "input_path": "/root/terry/videos/26.mp4",
+      "input_path": "/ephemeral/videos/26.mp4",
       "output_path": "./output/fleet/v26.mp4"
     },
     {
       "id": "v27",
-      "input_path": "/root/terry/videos/27.mp4",
+      "input_path": "/ephemeral/videos/27.mp4",
       "output_path": "./output/fleet/v27.mp4"
     },
     {
       "id": "v28",
-      "input_path": "/root/terry/videos/28.mp4",
+      "input_path": "/ephemeral/videos/28.mp4",
       "output_path": "./output/fleet/v28.mp4"
     },
     {
       "id": "v29",
-      "input_path": "/root/terry/videos/29.mp4",
+      "input_path": "/ephemeral/videos/29.mp4",
       "output_path": "./output/fleet/v29.mp4"
     },
     {
       "id": "v30",
-      "input_path": "/root/terry/videos/30.mp4",
+      "input_path": "/ephemeral/videos/30.mp4",
       "output_path": "./output/fleet/v30.mp4"
     },
     {
       "id": "v31",
-      "input_path": "/root/terry/videos/31.mp4",
+      "input_path": "/ephemeral/videos/31.mp4",
       "output_path": "./output/fleet/v31.mp4"
     },
     {
       "id": "v32",
-      "input_path": "/root/terry/videos/32.mp4",
+      "input_path": "/ephemeral/videos/32.mp4",
       "output_path": "./output/fleet/v32.mp4"
     },
     {
       "id": "v33",
-      "input_path": "/root/terry/videos/33.mp4",
+      "input_path": "/ephemeral/videos/33.mp4",
       "output_path": "./output/fleet/v33.mp4"
     },
     {
       "id": "v34",
-      "input_path": "/root/terry/videos/34.mp4",
+      "input_path": "/ephemeral/videos/34.mp4",
       "output_path": "./output/fleet/v34.mp4"
     },
     {
       "id": "v35",
-      "input_path": "/root/terry/videos/35.mp4",
+      "input_path": "/ephemeral/videos/35.mp4",
       "output_path": "./output/fleet/v35.mp4"
     },
     {
       "id": "v36",
-      "input_path": "/root/terry/videos/36.mp4",
+      "input_path": "/ephemeral/videos/36.mp4",
       "output_path": "./output/fleet/v36.mp4"
     },
     {
       "id": "v37",
-      "input_path": "/root/terry/videos/37.mp4",
+      "input_path": "/ephemeral/videos/37.mp4",
       "output_path": "./output/fleet/v37.mp4"
     },
     {
       "id": "v38",
-      "input_path": "/root/terry/videos/38.mp4",
+      "input_path": "/ephemeral/videos/38.mp4",
       "output_path": "./output/fleet/v38.mp4"
     },
     {
       "id": "v39",
-      "input_path": "/root/terry/videos/39.mp4",
+      "input_path": "/ephemeral/videos/39.mp4",
       "output_path": "./output/fleet/v39.mp4"
     },
     {
       "id": "v40",
-      "input_path": "/root/terry/videos/40.mp4",
+      "input_path": "/ephemeral/videos/40.mp4",
       "output_path": "./output/fleet/v40.mp4"
     },
     {
       "id": "v41",
-      "input_path": "/root/terry/videos/41.mp4",
+      "input_path": "/ephemeral/videos/41.mp4",
       "output_path": "./output/fleet/v41.mp4"
     },
     {
       "id": "v42",
-      "input_path": "/root/terry/videos/42.mp4",
+      "input_path": "/ephemeral/videos/42.mp4",
       "output_path": "./output/fleet/v42.mp4"
     },
     {
       "id": "v43",
-      "input_path": "/root/terry/videos/43.mp4",
+      "input_path": "/ephemeral/videos/43.mp4",
       "output_path": "./output/fleet/v43.mp4"
     },
     {
       "id": "v44",
-      "input_path": "/root/terry/videos/44.mp4",
+      "input_path": "/ephemeral/videos/44.mp4",
       "output_path": "./output/fleet/v44.mp4"
     },
     {
       "id": "v45",
-      "input_path": "/root/terry/videos/45.mp4",
+      "input_path": "/ephemeral/videos/45.mp4",
       "output_path": "./output/fleet/v45.mp4"
     },
     {
       "id": "v46",
-      "input_path": "/root/terry/videos/46.mp4",
+      "input_path": "/ephemeral/videos/46.mp4",
       "output_path": "./output/fleet/v46.mp4"
     },
     {
       "id": "v47",
-      "input_path": "/root/terry/videos/47.mp4",
+      "input_path": "/ephemeral/videos/47.mp4",
       "output_path": "./output/fleet/v47.mp4"
     },
     {
       "id": "v48",
-      "input_path": "/root/terry/videos/48.mp4",
+      "input_path": "/ephemeral/videos/48.mp4",
       "output_path": "./output/fleet/v48.mp4"
     },
     {
       "id": "v49",
-      "input_path": "/root/terry/videos/49.mp4",
+      "input_path": "/ephemeral/videos/49.mp4",
       "output_path": "./output/fleet/v49.mp4"
     },
     {
       "id": "v50",
-      "input_path": "/root/terry/videos/50.mp4",
+      "input_path": "/ephemeral/videos/50.mp4",
       "output_path": "./output/fleet/v50.mp4"
     },
     {
       "id": "v51",
-      "input_path": "/root/terry/videos/51.mp4",
+      "input_path": "/ephemeral/videos/51.mp4",
       "output_path": "./output/fleet/v51.mp4"
     },
     {
       "id": "v52",
-      "input_path": "/root/terry/videos/52.mp4",
+      "input_path": "/ephemeral/videos/52.mp4",
       "output_path": "./output/fleet/v52.mp4"
     },
     {
       "id": "v53",
-      "input_path": "/root/terry/videos/53.mp4",
+      "input_path": "/ephemeral/videos/53.mp4",
       "output_path": "./output/fleet/v53.mp4"
     },
     {
       "id": "v54",
-      "input_path": "/root/terry/videos/54.mp4",
+      "input_path": "/ephemeral/videos/54.mp4",
       "output_path": "./output/fleet/v54.mp4"
     },
     {
       "id": "v55",
-      "input_path": "/root/terry/videos/55.mp4",
+      "input_path": "/ephemeral/videos/55.mp4",
       "output_path": "./output/fleet/v55.mp4"
     },
     {
       "id": "v56",
-      "input_path": "/root/terry/videos/56.mp4",
+      "input_path": "/ephemeral/videos/56.mp4",
       "output_path": "./output/fleet/v56.mp4"
     },
     {
       "id": "v57",
-      "input_path": "/root/terry/videos/57.mp4",
+      "input_path": "/ephemeral/videos/57.mp4",
       "output_path": "./output/fleet/v57.mp4"
     },
     {
       "id": "v58",
-      "input_path": "/root/terry/videos/58.mp4",
+      "input_path": "/ephemeral/videos/58.mp4",
       "output_path": "./output/fleet/v58.mp4"
     },
     {
       "id": "v59",
-      "input_path": "/root/terry/videos/59.mp4",
+      "input_path": "/ephemeral/videos/59.mp4",
       "output_path": "./output/fleet/v59.mp4"
     },
     {
       "id": "v60",
-      "input_path": "/root/terry/videos/60.mp4",
+      "input_path": "/ephemeral/videos/60.mp4",
       "output_path": "./output/fleet/v60.mp4"
     },
     {
       "id": "v61",
-      "input_path": "/root/terry/videos/61.mp4",
+      "input_path": "/ephemeral/videos/61.mp4",
       "output_path": "./output/fleet/v61.mp4"
     },
     {
       "id": "v62",
-      "input_path": "/root/terry/videos/62.mp4",
+      "input_path": "/ephemeral/videos/62.mp4",
       "output_path": "./output/fleet/v62.mp4"
     },
     {
       "id": "v63",
-      "input_path": "/root/terry/videos/63.mp4",
+      "input_path": "/ephemeral/videos/63.mp4",
       "output_path": "./output/fleet/v63.mp4"
     },
     {
       "id": "v64",
-      "input_path": "/root/terry/videos/64.mp4",
+      "input_path": "/ephemeral/videos/64.mp4",
       "output_path": "./output/fleet/v64.mp4"
     },
     {
       "id": "v65",
-      "input_path": "/root/terry/videos/65.mp4",
+      "input_path": "/ephemeral/videos/65.mp4",
       "output_path": "./output/fleet/v65.mp4"
     },
     {
       "id": "v66",
-      "input_path": "/root/terry/videos/66.mp4",
+      "input_path": "/ephemeral/videos/66.mp4",
       "output_path": "./output/fleet/v66.mp4"
     },
     {
       "id": "v67",
-      "input_path": "/root/terry/videos/67.mp4",
+      "input_path": "/ephemeral/videos/67.mp4",
       "output_path": "./output/fleet/v67.mp4"
     },
     {
       "id": "v68",
-      "input_path": "/root/terry/videos/68.mp4",
+      "input_path": "/ephemeral/videos/68.mp4",
       "output_path": "./output/fleet/v68.mp4"
     },
     {
       "id": "v69",
-      "input_path": "/root/terry/videos/69.mp4",
+      "input_path": "/ephemeral/videos/69.mp4",
       "output_path": "./output/fleet/v69.mp4"
     },
     {
       "id": "v70",
-      "input_path": "/root/terry/videos/70.mp4",
+      "input_path": "/ephemeral/videos/70.mp4",
       "output_path": "./output/fleet/v70.mp4"
     },
     {
       "id": "v71",
-      "input_path": "/root/terry/videos/71.mp4",
+      "input_path": "/ephemeral/videos/71.mp4",
       "output_path": "./output/fleet/v71.mp4"
     },
     {
       "id": "v72",
-      "input_path": "/root/terry/videos/72.mp4",
+      "input_path": "/ephemeral/videos/72.mp4",
       "output_path": "./output/fleet/v72.mp4"
     },
     {
       "id": "v73",
-      "input_path": "/root/terry/videos/73.mp4",
+      "input_path": "/ephemeral/videos/73.mp4",
       "output_path": "./output/fleet/v73.mp4"
     },
     {
       "id": "v74",
-      "input_path": "/root/terry/videos/74.mp4",
+      "input_path": "/ephemeral/videos/74.mp4",
       "output_path": "./output/fleet/v74.mp4"
     },
     {
       "id": "v75",
-      "input_path": "/root/terry/videos/75.mp4",
+      "input_path": "/ephemeral/videos/75.mp4",
       "output_path": "./output/fleet/v75.mp4"
     }
   ],
@@ -381,7 +381,7 @@
   "codec_mode": "RC",
   "encoder": "libx265",
   "fleet_batch_size": 5,
-  "fleet_gpu_slots": 1,
+  "fleet_gpu_slots": 2,
   "libx265_refine_preset": "fast",
   "libx265_feature_baseline": true,
   "libx265_profile": "main",

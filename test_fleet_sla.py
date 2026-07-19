@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -465,7 +466,7 @@ class FleetSlaTests(unittest.TestCase):
             self.assertEqual(best["bitrate"], "8M")
             self.assertEqual(best["target_bitrate"], "8M")
 
-    def test_abr_requires_target_bitrate(self) -> None:
+    def test_abr_requires_target_bitrate_or_rate(self) -> None:
         with self.assertRaises(ValueError) as ctx:
             CompressionRequest.from_dict(
                 {
@@ -480,7 +481,29 @@ class FleetSlaTests(unittest.TestCase):
                     ],
                 }
             )
-        self.assertIn("target_bitrate", str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertTrue(
+            "target_bitrate" in msg or "target_compression_rate" in msg,
+            msg,
+        )
+
+    def test_abr_accepts_target_compression_rate(self) -> None:
+        req = CompressionRequest.from_dict(
+            {
+                "encoder": "libx265",
+                "codec_mode": "ABR",
+                "target_compression_rate": 0.035,
+                "jobs": [
+                    {
+                        "id": "x",
+                        "input_path": "/tmp/x.mp4",
+                        "output_path": "/tmp/y.mp4",
+                    }
+                ],
+            }
+        )
+        self.assertEqual(req.target_compression_rate, 0.035)
+        self.assertTrue(req.vbr_fallback_to_crf)
 
     def test_score_sla_final_uses_source_size_and_dual_vmaf(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -577,6 +600,175 @@ class FleetSlaTests(unittest.TestCase):
             )
 
 
+
+
+    def test_vbr_derives_bitrate_from_compression_rate(self) -> None:
+        from compress_util import bitrate_for_compression_rate, parse_bitrate_mbps
+
+        # 100_000_000 bytes, 30s, rate 0.035 → bits=28e6 → bps≈933333 → ~0.933M
+        br = bitrate_for_compression_rate(
+            source_bytes=100_000_000,
+            duration_sec=30.0,
+            compression_rate=0.035,
+        )
+        mbps = parse_bitrate_mbps(br)
+        self.assertIsNotNone(mbps)
+        self.assertAlmostEqual(mbps, 0.933333, places=3)
+
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src.mp4"
+            # ~10MB placeholder (size only; encode is mocked)
+            src.write_bytes(b"x" * 10_000_000)
+            out = Path(td) / "out.mp4"
+            work = Path(td) / "work"
+            template = CompressionRequest.from_dict(
+                {
+                    "work_dir": str(work),
+                    "skip_transfer": True,
+                    "encoder": "libx265",
+                    "codec_mode": "ABR",
+                    "target_compression_rate": 0.035,
+                    "vbr_fallback_to_crf": False,
+                    "libx265_refine_preset": "superfast",
+                    "libx265_params": "aq-mode=2:aq-strength=1.0:rd=5:ref=4:bframes=4:rc-lookahead=40",
+                    "param_tune": False,
+                    "time_budget_sec": 0,
+                    "final_encode_reserve_sec": 0,
+                    "probe_min_budget_sec": 0,
+                    "vmaf_threshold": 85,
+                    "jobs": [
+                        {
+                            "id": "rate",
+                            "input_path": str(src),
+                            "output_path": str(out),
+                        }
+                    ],
+                }
+            )
+            jobs = fleet_jobs_from_request(template)
+            encode_calls: list[dict] = []
+
+            def fake_extract(job, sample_frames, *, deadline):
+                _set_feature_scenes(job, duration=30.0, difficulty=0.4)
+
+            def fake_encode(input_path, output_path, **kwargs):
+                encode_calls.append(
+                    {
+                        "bitrate": kwargs.get("bitrate"),
+                        "codec_mode": kwargs.get("codec_mode"),
+                        "crf": kwargs.get("crf"),
+                    }
+                )
+                Path(output_path).write_bytes(b"vbr-encode")
+                return EncodeResult(True, output_path, 0, "", [])
+
+            with patch("batch_search.download_to_path"), patch(
+                "batch_search.upload_presigned_put"
+            ), patch(
+                "batch_search._extract_sla_features", side_effect=fake_extract
+            ), patch(
+                "batch_search.search_crf"
+            ) as search_mock, patch(
+                "batch_search.encode_hevc", side_effect=fake_encode
+            ), patch(
+                "batch_search.score_candidate",
+                return_value=_score(s_f=0.5, vmaf=88.0),
+            ), patch(
+                "batch_search.validate_hevc_output",
+                return_value=EncodeValidation(True, [], {}),
+            ):
+                results = run_fleet_sla(template, jobs)
+
+            search_mock.assert_not_called()
+            self.assertEqual(jobs[0].error, "")
+            self.assertIsNotNone(jobs[0].chosen_bitrate)
+            self.assertTrue(all(c["codec_mode"] == "ABR" for c in encode_calls))
+            self.assertTrue(all(c["crf"] is None for c in encode_calls))
+            # 10MB / 30s / 0.035 → ~0.093M
+            mbps = parse_bitrate_mbps(jobs[0].chosen_bitrate)
+            self.assertIsNotNone(mbps)
+            self.assertAlmostEqual(mbps, 0.093333, places=3)
+            self.assertEqual(results[0].strategy, "fleet_sla_x265_fixed_vbr")
+
+    def test_vbr_falls_back_to_crf_when_below_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src.mp4"
+            src.write_bytes(b"local-input")
+            out = Path(td) / "out.mp4"
+            work = Path(td) / "work"
+            template = CompressionRequest.from_dict(
+                {
+                    "work_dir": str(work),
+                    "skip_transfer": True,
+                    "encoder": "libx265",
+                    "codec_mode": "ABR",
+                    "target_bitrate": "1M",
+                    "vbr_fallback_to_crf": True,
+                    "scene_crf_search": True,
+                    "libx265_refine_preset": "superfast",
+                    "libx265_params": "aq-mode=2:aq-strength=1.0:rd=5:ref=4:bframes=4:rc-lookahead=40",
+                    "param_tune": False,
+                    "time_budget_sec": 0,
+                    "final_encode_reserve_sec": 0,
+                    "probe_min_budget_sec": 0,
+                    "vmaf_threshold": 85,
+                    "jobs": [
+                        {
+                            "id": "fb",
+                            "input_path": str(src),
+                            "output_path": str(out),
+                        }
+                    ],
+                }
+            )
+            jobs = fleet_jobs_from_request(template)
+            modes: list[str] = []
+
+            def fake_extract(job, sample_frames, *, deadline):
+                _set_feature_scenes(job, duration=30.0, difficulty=0.4)
+
+            def fake_encode(input_path, output_path, **kwargs):
+                modes.append(str(kwargs.get("codec_mode")))
+                Path(output_path).write_bytes(b"enc")
+                return EncodeResult(True, output_path, 0, "", [])
+
+            def fake_score(*args, **kwargs):
+                # VBR probe stays below threshold so fallback triggers.
+                return _score(s_f=0.05, vmaf=82.0)
+
+            def fake_search(evaluate, **kwargs):
+                return CrfSearchResult(True, 30.0, 90.0, reason="test")
+
+            with patch("batch_search.download_to_path"), patch(
+                "batch_search.upload_presigned_put"
+            ), patch(
+                "batch_search._extract_sla_features", side_effect=fake_extract
+            ), patch(
+                "batch_search.search_crf", side_effect=fake_search
+            ), patch(
+                "batch_search.encode_hevc", side_effect=fake_encode
+            ), patch(
+                "batch_search.score_candidate", side_effect=fake_score
+            ), patch(
+                "batch_search.validate_hevc_output",
+                return_value=EncodeValidation(True, [], {}),
+            ), patch(
+                "batch_search._score_sla_final",
+                side_effect=lambda req, job, trial, *, deadline: _final_score_trial(trial),
+            ):
+                results = run_fleet_sla(template, jobs)
+
+            self.assertEqual(jobs[0].error, "")
+            self.assertTrue(jobs[0].vbr_fell_back_to_crf)
+            self.assertIsNone(jobs[0].chosen_bitrate)
+            self.assertEqual(jobs[0].chosen_crf, 30)
+            self.assertIn("ABR", modes)
+            self.assertIn("RC", modes)
+            self.assertTrue(
+                results[0].strategy.startswith("fleet_sla_x265_vbr_fallback_crf")
+            )
+
+
 class ScoringTimeoutTests(unittest.TestCase):
     def test_score_candidate_timeout_returns_zero(self) -> None:
         from scoring import score_candidate
@@ -594,6 +786,85 @@ class ScoringTimeoutTests(unittest.TestCase):
         self.assertEqual(result.s_f, 0.0)
         self.assertIn("scoring_timeout", result.reason)
 
+
+
+class SkipPublishedTests(unittest.TestCase):
+    def test_filter_pending_skips_published_and_seeds_work(self) -> None:
+        from batch_search import (
+            FleetVideoJob,
+            filter_pending_fleet_jobs,
+            is_usable_best_payload,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pub = root / "published_results" / "85" / "v1"
+            pub.mkdir(parents=True)
+            best = {
+                "job_id": "v1",
+                "crf": 30,
+                "s_f": 0.5,
+                "error": None,
+                "libx265_params": "aq-mode=1",
+            }
+            self.assertTrue(is_usable_best_payload(best))
+            (pub / "best.json").write_text(json.dumps(best), encoding="utf-8")
+            (pub / "result.json").write_text("{}", encoding="utf-8")
+
+            work = root / "work_fleet" / "85"
+            jobs = [
+                FleetVideoJob(
+                    job_id="v1",
+                    input_path="/ephemeral/videos/1.mp4",
+                    output_path=str(root / "out" / "v1.mp4"),
+                    work_dir=str(work / "v1"),
+                ),
+                FleetVideoJob(
+                    job_id="v2",
+                    input_path="/ephemeral/videos/2.mp4",
+                    output_path=str(root / "out" / "v2.mp4"),
+                    work_dir=str(work / "v2"),
+                ),
+            ]
+            pending, skipped = filter_pending_fleet_jobs(
+                jobs,
+                threshold=85,
+                published_root=str(root / "published_results"),
+                skip_complete=True,
+                seed_work=True,
+            )
+            self.assertEqual([j.job_id for j in pending], ["v2"])
+            self.assertEqual([j.job_id for j in skipped], ["v1"])
+            self.assertTrue((work / "v1" / "best.json").is_file())
+            self.assertTrue((work / "v1" / "result.json").is_file())
+
+    def test_force_keeps_all_jobs(self) -> None:
+        from batch_search import FleetVideoJob, filter_pending_fleet_jobs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pub = root / "published_results" / "85" / "v1"
+            pub.mkdir(parents=True)
+            (pub / "best.json").write_text(
+                json.dumps({"job_id": "v1", "crf": 30, "s_f": 0.5, "error": None}),
+                encoding="utf-8",
+            )
+            jobs = [
+                FleetVideoJob(
+                    job_id="v1",
+                    input_path="/ephemeral/videos/1.mp4",
+                    output_path=str(root / "out" / "v1.mp4"),
+                    work_dir=str(root / "work" / "v1"),
+                )
+            ]
+            pending, skipped = filter_pending_fleet_jobs(
+                jobs,
+                threshold=85,
+                published_root=str(root / "published_results"),
+                skip_complete=False,
+            )
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(skipped, [])
 
 if __name__ == "__main__":
     unittest.main()

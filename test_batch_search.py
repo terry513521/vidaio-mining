@@ -119,8 +119,11 @@ class FleetRequestTests(unittest.TestCase):
         self.assertFalse(jobs[2].use_gpu)
         assign_fleet_gpu_slots(jobs, 2)
         self.assertTrue(jobs[0].use_gpu)
+        self.assertEqual(jobs[0].gpu_device, 0)
         self.assertTrue(jobs[1].use_gpu)
+        self.assertEqual(jobs[1].gpu_device, 1)
         self.assertFalse(jobs[2].use_gpu)
+        self.assertIsNone(jobs[2].gpu_device)
 
     def test_http_jobs_are_parsed_and_materialized(self) -> None:
         req = CompressionRequest.from_dict(

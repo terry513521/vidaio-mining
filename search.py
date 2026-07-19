@@ -200,6 +200,7 @@ def _score(
     compression_rate_override: Optional[float] = None,
     timeout: Optional[float] = None,
     vmaf_docker_gpus: Optional[bool] = None,
+    vmaf_gpu_device: Optional[int] = None,
     pair_gates: bool = True,
 ) -> ScoreResult:
     return score_candidate(
@@ -215,6 +216,7 @@ def _score(
         vmaf_docker_gpus=(
             req.vmaf_docker_gpus if vmaf_docker_gpus is None else vmaf_docker_gpus
         ),
+        vmaf_gpu_device=vmaf_gpu_device,
         compression_rate_override=compression_rate_override,
         codec_mode=req.codec_mode,
         target_bitrate_mbps=_parse_bitrate_mbps(req.target_bitrate),

@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Fleet SLA compression: optional download/upload, one CQ probe, one x265 final."""
+"""Fleet SLA compression: optional download/upload, one CQ probe, one x265 final.
+
+By default, jobs that already have a usable ``best.json`` under
+``published_results/<vmaf_threshold>/<job_id>/`` (or the per-job work dir)
+are skipped so a stopped fleet run can resume. Use ``--force`` to re-run all.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +14,7 @@ import sys
 from pathlib import Path
 
 from batch_search import (
+    filter_pending_fleet_jobs,
     fleet_job_final_payload,
     fleet_jobs_from_request,
     load_fleet_jobs,
@@ -52,6 +58,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=str(DEFAULT_DB_PATH),
         help="SQLite results database path",
     )
+    p.add_argument(
+        "--published-root",
+        default="published_results",
+        help="Root of published JSON results used to skip finished jobs",
+    )
+    p.add_argument(
+        "--skip-published",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Skip jobs with a usable best.json in published_results/ "
+            "or work_dir (default: true)"
+        ),
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-run all jobs (same as --no-skip-published)",
+    )
     return p.parse_args(argv)
 
 
@@ -83,12 +108,42 @@ def main(argv: list[str] | None = None) -> int:
         log("No jobs found", file=sys.stderr)
         return 1
 
-    mode = "local" if template.skip_transfer else "http"
-    codec_txt = (
-        f"ABR/{template.target_bitrate}"
-        if template.is_abr
-        else "RC/CRF"
+    skip_complete = bool(args.skip_published) and not bool(args.force)
+    pending, skipped = filter_pending_fleet_jobs(
+        jobs,
+        threshold=template.vmaf_threshold,
+        published_root=args.published_root,
+        skip_complete=skip_complete,
+        seed_work=True,
     )
+    if skipped:
+        sample = ", ".join(j.job_id for j in skipped[:12])
+        more = f" … (+{len(skipped) - 12})" if len(skipped) > 12 else ""
+        log(
+            f"Skipping {len(skipped)} finished job(s) "
+            f"(published_results / work best.json): {sample}{more}"
+        )
+    jobs = pending
+    if not jobs:
+        log(
+            f"All {len(skipped)} job(s) already complete under "
+            f"{args.published_root}/ — nothing to run"
+        )
+        return 0
+
+    mode = "local" if template.skip_transfer else "http"
+    if template.is_abr:
+        rate = template.target_compression_rate
+        if template.target_bitrate:
+            codec_txt = f"ABR/{template.target_bitrate}"
+        elif rate is not None:
+            codec_txt = f"ABR/rate={float(rate):.4f}"
+        else:
+            codec_txt = "ABR/per-job"
+        if template.vbr_fallback_to_crf:
+            codec_txt += "+crf_fallback"
+    else:
+        codec_txt = "RC/CRF"
     run_id = start_run(
         db_path=args.results_db,
         request_path=args.request,
@@ -100,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     log(
-        f"Fleet SLA ({mode}, {codec_txt}): {len(jobs)} video(s), "
+        f"Fleet SLA ({mode}, {codec_txt}): {len(jobs)} video(s)"
+        f"{f', skipped={len(skipped)}' if skipped else ''}, "
         f"batch_size={template.fleet_batch_size}, run_id={run_id}, "
         f"db={args.results_db}"
     )
@@ -133,7 +189,10 @@ def main(argv: list[str] | None = None) -> int:
         job_count=len(results),
         ok_count=ok,
     )
-    log(f"Done: {ok}/{len(results)} videos delivered (db run_id={run_id})")
+    log(
+        f"Done: {ok}/{len(results)} videos delivered "
+        f"(skipped {len(skipped)} already complete; db run_id={run_id})"
+    )
     return 0 if ok == len(results) else 1
 
 

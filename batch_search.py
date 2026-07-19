@@ -15,7 +15,11 @@ from dataclasses import dataclass, field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Optional
 
-from compress_util import format_compression, measure_compression
+from compress_util import (
+    bitrate_for_compression_rate,
+    format_compression,
+    measure_compression,
+)
 from crf_search import (
     CrfAttempt,
     CrfSearchResult,
@@ -65,6 +69,8 @@ class FleetVideoJob:
     upload_url: str = ""
     crf: Optional[int] = None
     libx265_params: Optional[str] = None
+    target_bitrate: Optional[str] = None
+    target_compression_rate: Optional[float] = None
     features: dict[str, Any] = field(default_factory=dict)
     segments: list[dict[str, Any]] = field(default_factory=list)
     scenes: list[SceneSpan] = field(default_factory=list)
@@ -84,13 +90,19 @@ class FleetVideoJob:
     vmaf_threshold: Optional[int] = None
     param_tune_trials: int = 0
     param_tune_history: list[dict[str, Any]] = field(default_factory=list)
+    vbr_fell_back_to_crf: bool = False
     uploaded: bool = False
     use_gpu: bool = False
+    gpu_device: Optional[int] = None
     error: str = ""
     stage_timings: dict[str, float] = field(default_factory=dict)
 
 
 def _fleet_sla_strategy(job: FleetVideoJob) -> str:
+    if job.vbr_fell_back_to_crf:
+        if job.param_tune_trials > 0:
+            return "fleet_sla_x265_vbr_fallback_crf_param_tune"
+        return "fleet_sla_x265_vbr_fallback_crf"
     if job.chosen_bitrate:
         if job.param_tune_trials > 0:
             return "fleet_sla_x265_vbr_param_tune"
@@ -104,10 +116,30 @@ def assign_fleet_gpu_slots(
     jobs: list[FleetVideoJob],
     slots: int,
 ) -> None:
-    """Mark the first ``slots`` jobs for GPU VMAF; encode is always libx265."""
+    """Mark the first ``slots`` jobs for GPU VMAF; encode is always libx265.
+
+    Each GPU job gets a distinct ``gpu_device`` (0..slots-1) so parallel
+    libvmaf_cuda scores can use separate cards.
+    """
     gpu_slots = max(0, int(slots))
     for index, job in enumerate(jobs):
-        job.use_gpu = index < gpu_slots
+        if index < gpu_slots:
+            job.use_gpu = True
+            job.gpu_device = index
+        else:
+            job.use_gpu = False
+            job.gpu_device = None
+
+
+
+
+def _job_vmaf_gpu_kwargs(job: FleetVideoJob, req: CompressionRequest) -> dict[str, Any]:
+    """Docker VMAF GPU flags for one fleet job."""
+    use = bool(job.use_gpu and req.vmaf_docker_gpus)
+    return {
+        "vmaf_docker_gpus": use,
+        "vmaf_gpu_device": job.gpu_device if use else None,
+    }
 
 
 def fleet_job_final_payload(
@@ -143,6 +175,7 @@ def fleet_job_final_payload(
     payload["vmaf_threshold"] = job.vmaf_threshold
     payload["features"] = job.features
     payload["param_tune_trials"] = job.param_tune_trials
+    payload["vbr_fell_back_to_crf"] = bool(job.vbr_fell_back_to_crf)
     return payload
 
 
@@ -168,6 +201,7 @@ def save_best_encode_config(job: FleetVideoJob) -> Path:
         "compression_rate": best.score.compression_rate if best else None,
         "param_tune_trials": job.param_tune_trials,
         "param_tune_history": job.param_tune_history,
+        "vbr_fell_back_to_crf": bool(job.vbr_fell_back_to_crf),
         "error": job.error or None,
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -218,7 +252,23 @@ def _job_request(template: CompressionRequest, job: FleetVideoJob) -> Compressio
             if job.libx265_params is not None
             else template.libx265_params
         ),
+        target_bitrate=(
+            job.target_bitrate
+            if job.target_bitrate is not None
+            else template.target_bitrate
+        ),
+        target_compression_rate=(
+            job.target_compression_rate
+            if job.target_compression_rate is not None
+            else template.target_compression_rate
+        ),
     )
+    if job.vbr_fell_back_to_crf or (
+        job.chosen_crf is not None and not job.chosen_bitrate
+    ):
+        req.codec_mode = "RC"
+        req.target_bitrate = None
+        req.target_compression_rate = None
     if req.encoder == "hevc_nvenc" and req.nvenc_feature_baseline and job.features:
         apply_feature_nvenc_baseline(req, job.features)
     return req
@@ -557,6 +607,139 @@ def _threshold_label(req: CompressionRequest) -> str:
     return str(int(req.vmaf_threshold))
 
 
+def is_usable_best_payload(payload: dict[str, Any]) -> bool:
+    """True when ``best.json`` looks like a finished successful encode config."""
+    if not payload:
+        return False
+    err = payload.get("error")
+    if err not in (None, "", False):
+        return False
+    if payload.get("crf") is None and not payload.get("bitrate"):
+        return False
+    s_f = payload.get("s_f")
+    if s_f is not None:
+        try:
+            if float(s_f) <= 0.0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def load_usable_best_json(path: Path) -> Optional[dict[str, Any]]:
+    """Load ``best.json`` if present and usable; otherwise ``None``."""
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not is_usable_best_payload(payload):
+        return None
+    return payload
+
+
+def published_best_path(
+    job_id: str,
+    threshold: int | str,
+    *,
+    published_root: str | Path = "published_results",
+) -> Path:
+    safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in job_id)
+    return Path(published_root) / str(threshold) / safe_id / "best.json"
+
+
+def work_best_path(job: FleetVideoJob) -> Path:
+    return Path(job.work_dir) / "best.json"
+
+
+def job_already_complete(
+    job: FleetVideoJob,
+    *,
+    threshold: int | str,
+    published_root: str | Path = "published_results",
+) -> tuple[bool, Optional[Path]]:
+    """Return (complete, source_best_json) using work dir first, then published."""
+    work_path = work_best_path(job)
+    if load_usable_best_json(work_path) is not None:
+        return True, work_path
+    pub_path = published_best_path(
+        job.job_id, threshold, published_root=published_root
+    )
+    if load_usable_best_json(pub_path) is not None:
+        return True, pub_path
+    return False, None
+
+
+def seed_work_dir_from_published(
+    job: FleetVideoJob,
+    *,
+    threshold: int | str,
+    published_root: str | Path = "published_results",
+) -> bool:
+    """Copy published best/result into the job work dir so publish stays merge-safe.
+
+    Returns True if anything was copied or work already had a usable best.json.
+    """
+    work_dir = Path(job.work_dir)
+    work_best = work_dir / "best.json"
+    if load_usable_best_json(work_best) is not None:
+        return True
+
+    pub_dir = published_best_path(
+        job.job_id, threshold, published_root=published_root
+    ).parent
+    pub_best = pub_dir / "best.json"
+    if load_usable_best_json(pub_best) is None:
+        return False
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(pub_best, work_best)
+    pub_result = pub_dir / "result.json"
+    work_result = work_dir / "result.json"
+    if pub_result.is_file() and not work_result.is_file():
+        shutil.copy2(pub_result, work_result)
+    return True
+
+
+def filter_pending_fleet_jobs(
+    jobs: list[FleetVideoJob],
+    *,
+    threshold: int | str,
+    published_root: str | Path = "published_results",
+    skip_complete: bool = True,
+    seed_work: bool = True,
+) -> tuple[list[FleetVideoJob], list[FleetVideoJob]]:
+    """Split jobs into (pending, skipped).
+
+    A job is skipped when ``work_dir/best.json`` or
+    ``published_results/<threshold>/<job_id>/best.json`` is a usable success.
+    When skipping, optionally seed ``work_dir`` from published so later
+    ``publish_results.py`` does not wipe already-finished configs.
+    """
+    if not skip_complete:
+        return list(jobs), []
+
+    pending: list[FleetVideoJob] = []
+    skipped: list[FleetVideoJob] = []
+    for job in jobs:
+        complete, _src = job_already_complete(
+            job, threshold=threshold, published_root=published_root
+        )
+        if not complete:
+            pending.append(job)
+            continue
+        skipped.append(job)
+        if seed_work:
+            try:
+                seed_work_dir_from_published(
+                    job, threshold=threshold, published_root=published_root
+                )
+            except OSError as exc:
+                log(f"  [{job.job_id}] seed work from published failed: {exc}")
+    return pending, skipped
+
+
 def _output_path_for_threshold(
     output_path: str,
     *,
@@ -602,6 +785,8 @@ def fleet_jobs_from_request(req: CompressionRequest) -> list[FleetVideoJob]:
                     work_dir=str(job_dir),
                     crf=item.get("crf"),
                     libx265_params=item.get("libx265_params"),
+                    target_bitrate=item.get("target_bitrate"),
+                    target_compression_rate=item.get("target_compression_rate"),
                     vmaf_threshold=int(req.vmaf_threshold),
                 )
             )
@@ -616,6 +801,8 @@ def fleet_jobs_from_request(req: CompressionRequest) -> list[FleetVideoJob]:
                     work_dir=str(job_dir),
                     crf=item.get("crf"),
                     libx265_params=item.get("libx265_params"),
+                    target_bitrate=item.get("target_bitrate"),
+                    target_compression_rate=item.get("target_compression_rate"),
                     vmaf_threshold=int(req.vmaf_threshold),
                 )
             )
@@ -654,10 +841,10 @@ def _score_sla_final(
         vmaf_n_threads=req.vmaf_n_threads,
         vmaf_backend=req.vmaf_backend,
         vmaf_docker_image=req.vmaf_docker_image,
-        vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
-        codec_mode=req.codec_mode,
-        target_bitrate_mbps=_parse_bitrate_mbps(req.target_bitrate)
-        if req.is_abr
+        **_job_vmaf_gpu_kwargs(job, req),
+        codec_mode=("ABR" if job.chosen_bitrate else "RC"),
+        target_bitrate_mbps=_parse_bitrate_mbps(job.chosen_bitrate)
+        if job.chosen_bitrate
         else None,
         timeout=timeout,
     )
@@ -844,7 +1031,7 @@ def _run_fixed_crf_probe(
         vmaf_n_threads=vmaf_threads,
         vmaf_backend=req.vmaf_backend,
         vmaf_docker_image=req.vmaf_docker_image,
-        vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
+        **_job_vmaf_gpu_kwargs(job, req),
         codec_mode=req.codec_mode,
         timeout=timeout_from_deadline(probe_deadline),
     )
@@ -881,6 +1068,85 @@ def _run_fixed_crf_probe(
     job.best_params = recipe.params
 
 
+
+def _resolve_job_target_bitrate(
+    req: CompressionRequest,
+    job: FleetVideoJob,
+) -> str:
+    """Return explicit ``target_bitrate`` or derive from ``target_compression_rate``."""
+    explicit = str(req.target_bitrate or "").strip()
+    if explicit:
+        return explicit
+    rate = req.target_compression_rate
+    if rate is None:
+        raise ValueError(
+            "ABR/VBR needs target_bitrate or target_compression_rate "
+            f"for job {job.job_id!r}"
+        )
+    src = Path(job.input_path)
+    if not src.is_file():
+        raise ValueError(f"local input not found: {job.input_path}")
+    duration = float((job.features or {}).get("duration") or 0.0)
+    if duration <= 0:
+        from scoring import probe_video
+
+        probe = probe_video(job.input_path, req.ffprobe_bin)
+        fmt = probe.get("format") or {}
+        try:
+            duration = float(fmt.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+    if duration <= 0:
+        raise ValueError(
+            f"unable to resolve duration for bitrate from compression_rate "
+            f"({job.job_id})"
+        )
+    size_bytes = src.stat().st_size
+    bitrate = bitrate_for_compression_rate(
+        source_bytes=size_bytes,
+        duration_sec=duration,
+        compression_rate=float(rate),
+    )
+    log(
+        f"  [{job.job_id}] derived VBR bitrate {bitrate} "
+        f"from target_compression_rate={float(rate):.4f} "
+        f"(size={size_bytes} duration={duration:.2f}s)"
+    )
+    return bitrate
+
+
+def _vbr_met_vmaf_threshold(job: FleetVideoJob, threshold: float) -> bool:
+    """True when the VBR probe/tune result clears the VMAF floor with usable s_f."""
+    if job.error:
+        return False
+    probe = job.probe_best
+    if probe is None or not probe.encode_ok:
+        return False
+    score = probe.score
+    return (
+        float(score.vmaf) >= float(threshold)
+        and float(score.s_f) > 0
+        and bool(score.passed_encoding_gates)
+        and bool(score.passed_vmaf_delta_gate)
+    )
+
+
+def _reset_job_for_crf_fallback(job: FleetVideoJob) -> None:
+    """Clear VBR probe state so the CRF path can run on the same job."""
+    job.error = ""
+    job.chosen_bitrate = None
+    job.chosen_crf = None
+    job.probe_best = None
+    job.nvenc_best = None
+    job.final_best = None
+    job.param_tune_trials = 0
+    job.param_tune_history = []
+    job.best_params = None
+    job.probe_plan = []
+    job.probe_seed = 0
+    job.vbr_fell_back_to_crf = True
+
+
 def _run_fixed_bitrate_probe(
     template: CompressionRequest,
     job: FleetVideoJob,
@@ -898,9 +1164,10 @@ def _run_fixed_bitrate_probe(
     req = _job_request(template, job)
     req.encoder = "libx265"
     req.max_workers = 1
-    target_bitrate = str(req.target_bitrate or "").strip()
-    if not target_bitrate:
-        job.error = "target_bitrate is required for ABR/VBR fleet mode"
+    try:
+        target_bitrate = _resolve_job_target_bitrate(req, job)
+    except ValueError as exc:
+        job.error = str(exc)
         return
     target_mbps = _parse_bitrate_mbps(target_bitrate)
     if target_mbps is None or target_mbps <= 0:
@@ -971,7 +1238,7 @@ def _run_fixed_bitrate_probe(
         vmaf_n_threads=vmaf_threads,
         vmaf_backend=req.vmaf_backend,
         vmaf_docker_image=req.vmaf_docker_image,
-        vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
+        **_job_vmaf_gpu_kwargs(job, req),
         codec_mode="ABR",
         target_bitrate_mbps=target_mbps,
         timeout=timeout_from_deadline(probe_deadline),
@@ -1119,7 +1386,7 @@ def _run_param_tune_after_crf(
             vmaf_n_threads=vmaf_threads,
             vmaf_backend=req.vmaf_backend,
             vmaf_docker_image=req.vmaf_docker_image,
-            vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
+            **_job_vmaf_gpu_kwargs(job, req),
             codec_mode=req.codec_mode,
             timeout=timeout_from_deadline(probe_deadline),
         )
@@ -1311,7 +1578,7 @@ def _run_param_tune_after_bitrate(
             vmaf_n_threads=vmaf_threads,
             vmaf_backend=req.vmaf_backend,
             vmaf_docker_image=req.vmaf_docker_image,
-            vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
+            **_job_vmaf_gpu_kwargs(job, req),
             codec_mode="ABR",
             target_bitrate_mbps=target_mbps,
             timeout=timeout_from_deadline(probe_deadline),
@@ -1526,7 +1793,7 @@ def _run_scene_crf_probe(
                 vmaf_n_threads=probe_vmaf_threads,
                 vmaf_backend=req.vmaf_backend,
                 vmaf_docker_image=req.vmaf_docker_image,
-                vmaf_docker_gpus=bool(job.use_gpu and req.vmaf_docker_gpus),
+                **_job_vmaf_gpu_kwargs(job, req),
                 codec_mode=req.codec_mode,
                 timeout=timeout_from_deadline(probe_deadline),
             )
@@ -1644,8 +1911,46 @@ def _run_sla_probe(
     probe_deadline: float,
 ) -> None:
     if template.is_abr:
-        return _run_fixed_bitrate_probe(template, job, probe_deadline=probe_deadline)
+        _run_fixed_bitrate_probe(template, job, probe_deadline=probe_deadline)
+        if bool(template.vbr_fallback_to_crf) and not _vbr_met_vmaf_threshold(
+            job, float(template.vmaf_threshold)
+        ):
+            vmaf_txt = (
+                f"{job.probe_best.score.vmaf:.2f}"
+                if job.probe_best is not None
+                else "n/a"
+            )
+            reason = job.error or f"vmaf={vmaf_txt} < {template.vmaf_threshold}"
+            log(
+                f"  [{job.job_id}] VBR missed threshold ({reason}); "
+                f"falling back to CRF search"
+            )
+            _reset_job_for_crf_fallback(job)
+            return _run_crf_probe_path(
+                template, job, probe_deadline=probe_deadline
+            )
+        return
 
+    return _run_crf_probe_path(template, job, probe_deadline=probe_deadline)
+
+
+def _run_crf_probe_path(
+    template: CompressionRequest,
+    job: FleetVideoJob,
+    *,
+    probe_deadline: float,
+) -> None:
+    """CRF fleet probe (scene search or legacy proxy)."""
+    from dataclasses import replace
+
+    # When invoked as VBR→CRF fallback, force RC so encodes use -crf not -b:v.
+    if template.is_abr or job.vbr_fell_back_to_crf:
+        template = replace(
+            template,
+            codec_mode="RC",
+            target_bitrate=None,
+            target_compression_rate=None,
+        )
     if template.scene_crf_search:
         return _run_scene_crf_probe(template, job, probe_deadline=probe_deadline)
 
@@ -1768,7 +2073,7 @@ def _encode_sla_candidate(
 ) -> TrialResult:
     """Full-file encode only; VMAF/scoring happens once on the chosen winner."""
     started = time.monotonic()
-    use_abr = req.is_abr or bool(bitrate)
+    use_abr = bool(bitrate)
     if use_abr:
         if not bitrate:
             raise ValueError("bitrate is required for ABR SLA final encode")
@@ -1782,7 +2087,7 @@ def _encode_sla_candidate(
         progress_label = f"[{job.job_id}] {encoder_name} CRF{crf}"
         enc_crf = int(crf)
         enc_bitrate = None
-        codec_mode = req.codec_mode
+        codec_mode = "RC"
     result = encode_hevc(
         job.input_path,
         str(output_path),
@@ -1888,11 +2193,9 @@ def _finalize_and_upload_sla_job(
 
     bitrate: Optional[str] = None
     crf: Optional[int] = None
-    if template.is_abr or job.chosen_bitrate:
-        bitrate = job.chosen_bitrate or req.target_bitrate
-        if not bitrate:
-            job.error = "target_bitrate is required for ABR/VBR finalize"
-            return
+    # Prefer explicit job outcomes so VBR→CRF fallback finalizes as CRF.
+    if job.chosen_bitrate:
+        bitrate = job.chosen_bitrate
         reason = (
             "vbr_param_tune" if job.param_tune_trials > 0 else "fixed_vbr"
         )
