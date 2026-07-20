@@ -40,8 +40,21 @@ from interp_search import (
 )
 from logutil import log
 from param_tune import TuneTrialResult, run_param_tune_loop
+from crf_mode import (
+    CrfModeTrial,
+    merge_crf_mode_pack_into_recipe_params,
+    run_crf_mode_phase_bc,
+)
 from proxy import build_proxy_reference, select_proxy_windows
-from recipes import HevcRecipe, describe_feature_x265_baseline, select_recipes
+from recipes import (
+    HevcRecipe,
+    PreprocessScoreView,
+    choose_best_preprocess,
+    choose_preprocess_ab_winner,
+    describe_feature_x265_baseline,
+    resolve_vbr_preprocess,
+    select_recipes,
+)
 from request import CompressionRequest
 from scene_detect import SceneSpan
 from scoring import ScoreResult, score_candidate, validate_hevc_output
@@ -87,6 +100,8 @@ class FleetVideoJob:
     chosen_crf: Optional[int] = None
     chosen_bitrate: Optional[str] = None
     best_params: Optional[str] = None
+    chosen_preprocess: Optional[str] = None
+    preprocess_reason: str = ""
     vmaf_threshold: Optional[int] = None
     param_tune_trials: int = 0
     param_tune_history: list[dict[str, Any]] = field(default_factory=list)
@@ -99,16 +114,22 @@ class FleetVideoJob:
 
 
 def _fleet_sla_strategy(job: FleetVideoJob) -> str:
+    hist = job.param_tune_history or []
+    used_crf_mode = any(str(h.get("label", "")).startswith(("aq=", "la=")) for h in hist)
     if job.vbr_fell_back_to_crf:
         if job.param_tune_trials > 0:
-            return "fleet_sla_x265_vbr_fallback_crf_param_tune"
+            return (
+                "fleet_sla_x265_vbr_fallback_crf_mode"
+                if used_crf_mode
+                else "fleet_sla_x265_vbr_fallback_crf_param_tune"
+            )
         return "fleet_sla_x265_vbr_fallback_crf"
     if job.chosen_bitrate:
         if job.param_tune_trials > 0:
             return "fleet_sla_x265_vbr_param_tune"
         return "fleet_sla_x265_fixed_vbr"
     if job.param_tune_trials > 0:
-        return "fleet_sla_x265_crf_param_tune"
+        return "fleet_sla_x265_crf_mode" if used_crf_mode else "fleet_sla_x265_crf_param_tune"
     return "fleet_sla_x265_full_crf"
 
 
@@ -172,6 +193,8 @@ def fleet_job_final_payload(
     payload["libx265_params"] = job.best_params or (
         job.recipe.params if job.recipe else None
     )
+    payload["preprocess"] = job.chosen_preprocess
+    payload["preprocess_reason"] = job.preprocess_reason or None
     payload["vmaf_threshold"] = job.vmaf_threshold
     payload["features"] = job.features
     payload["param_tune_trials"] = job.param_tune_trials
@@ -194,6 +217,8 @@ def save_best_encode_config(job: FleetVideoJob) -> Path:
         "target_bitrate": job.chosen_bitrate,
         "libx265_params": job.best_params
         or (job.recipe.params if job.recipe else None),
+        "preprocess": job.chosen_preprocess,
+        "preprocess_reason": job.preprocess_reason or None,
         "features": job.features,
         "s_f": best.score.s_f if best else None,
         "vmaf": best.score.vmaf if best else None,
@@ -892,6 +917,45 @@ def _scenes_from_segments(segments: list[dict[str, Any]]) -> list[SceneSpan]:
     return scenes
 
 
+def _select_crf_mode_recipe(
+    req: CompressionRequest,
+    features: Optional[dict[str, Any]],
+) -> tuple[HevcRecipe, str]:
+    """Build HEVC recipe: CRF-mode fixed pack when enabled, else select_recipes."""
+    preset = req.libx265_refine_preset or "fast"
+    if bool(req.crf_mode_pack) and bool(getattr(req, "crf_mode_tune", True)):
+        params, aq_mode, reason = merge_crf_mode_pack_into_recipe_params(
+            features,
+            params_override=req.libx265_params,
+        )
+        seed = int(
+            select_recipes(
+                features or {},
+                req.vmaf_threshold,
+                max_recipes=1,
+                preset=preset,
+                feature_baseline=False,
+                params_override=None,
+            )[0].crf_start
+        )
+        recipe = HevcRecipe(
+            name=f"crf_mode_{preset}",
+            preset=preset,
+            params=params,
+            crf_start=seed,
+        )
+        return recipe, f"aq-mode={aq_mode}; {reason}"
+    recipe = select_recipes(
+        features or {},
+        req.vmaf_threshold,
+        max_recipes=1,
+        preset=preset,
+        feature_baseline=bool(req.libx265_feature_baseline),
+        params_override=req.libx265_params,
+    )[0]
+    return recipe, "legacy select_recipes"
+
+
 def _extract_sla_features(
     job: FleetVideoJob,
     sample_frames: int,
@@ -970,14 +1034,7 @@ def _run_fixed_crf_probe(
     req.encoder = "libx265"
     req.max_workers = 1
     fixed_crf = int(req.crf)  # type: ignore[arg-type]
-    recipe = select_recipes(
-        job.features or {},
-        req.vmaf_threshold,
-        max_recipes=1,
-        preset=req.libx265_refine_preset,
-        feature_baseline=bool(req.libx265_feature_baseline),
-        params_override=req.libx265_params,
-    )[0]
+    recipe, pack_reason = _select_crf_mode_recipe(req, job.features)
     job.recipe = recipe
     job.stage_timings["scene_samples"] = 0.0
     job.probe_seed = fixed_crf
@@ -992,8 +1049,7 @@ def _run_fixed_crf_probe(
 
     log(
         f"  [{job.job_id}] fixed CRF {fixed_crf}: dual VMAF, preset={preset}, "
-        f"feature_baseline={bool(req.libx265_feature_baseline)}, "
-        f"params={'set' if req.libx265_params else 'default/feature'}"
+        f"pack={pack_reason}"
     )
     if recipe.params:
         log(f"  [{job.job_id}] x265-params={recipe.params}")
@@ -1142,9 +1198,24 @@ def _reset_job_for_crf_fallback(job: FleetVideoJob) -> None:
     job.param_tune_trials = 0
     job.param_tune_history = []
     job.best_params = None
+    job.chosen_preprocess = None
+    job.preprocess_reason = ""
     job.probe_plan = []
     job.probe_seed = 0
     job.vbr_fell_back_to_crf = True
+
+
+def _score_view_from_result(score: ScoreResult) -> PreprocessScoreView:
+    gates_ok = (
+        float(score.vmaf) > 0
+        and bool(score.passed_encoding_gates)
+        and bool(score.passed_vmaf_delta_gate)
+    )
+    return PreprocessScoreView(
+        s_f=float(score.s_f or 0.0),
+        vmaf=float(score.vmaf or 0.0),
+        gates_ok=gates_ok,
+    )
 
 
 def _run_fixed_bitrate_probe(
@@ -1153,7 +1224,11 @@ def _run_fixed_bitrate_probe(
     *,
     probe_deadline: float,
 ) -> None:
-    """One full-file encode at target_bitrate + dual VMAF, then param tune."""
+    """One full-file encode at target_bitrate + dual VMAF, then param tune.
+
+    Resolves feature-driven denoise preprocess (optional A/B vs none) before
+    locking the winner for param tune.
+    """
     if job.error:
         return
     left = seconds_left(probe_deadline)
@@ -1189,81 +1264,164 @@ def _run_fixed_bitrate_probe(
     job.probe_seed = 0
     job.probe_plan = []
 
+    proposed, reason, candidates = resolve_vbr_preprocess(
+        explicit=req.preprocess,
+        preprocess_auto=bool(req.preprocess_auto),
+        features=job.features,
+        preprocess_sweep=bool(req.preprocess_sweep),
+    )
+    # Multi-arm when A/B/sweep asks for more than one distinct candidate.
+    unique_cands: list[Optional[str]] = []
+    for c in candidates:
+        if c not in unique_cands:
+            unique_cands.append(c)
+    do_multi = bool(req.preprocess_ab or req.preprocess_sweep) and len(unique_cands) > 1
+
     work_dir = Path(job.work_dir)
     safe_label = target_bitrate.replace("/", "_").replace(" ", "")
-    out = work_dir / f"full_vbr_{safe_label}.mp4"
     preset = req.libx265_refine_preset or "fast"
     fleet_n = max(1, int(template.fleet_batch_size))
     vmaf_threads = max(2, int(req.vmaf_n_threads) // fleet_n)
     min_attempt_sec = min(120.0, max(45.0, float(template.probe_min_budget_sec) * 0.15))
 
+    cand_txt = ",".join(c or "none" for c in unique_cands)
     log(
         f"  [{job.job_id}] fixed VBR {target_bitrate}: dual VMAF, preset={preset}, "
         f"feature_baseline={bool(req.libx265_feature_baseline)}, "
-        f"params={'set' if req.libx265_params else 'default/feature'}"
+        f"params={'set' if req.libx265_params else 'default/feature'}, "
+        f"preprocess={proposed or 'none'} ({reason})"
+        + (f" [candidates={cand_txt}]" if do_multi else "")
     )
     if recipe.params:
         log(f"  [{job.job_id}] x265-params={recipe.params}")
 
-    probe_started = time.monotonic()
-    enc = encode_hevc(
-        job.input_path,
-        str(out),
-        preset=preset,
-        params=recipe.params,
-        codec_mode="ABR",
-        crf=None,
-        bitrate=target_bitrate,
-        ffmpeg_bin=req.ffmpeg_bin,
-        timeout=timeout_from_deadline(probe_deadline),
-        encoder="libx265",
-        preprocess=req.preprocess,
-        libx265_profile=req.libx265_profile,
-        progress_reference_path=job.input_path,
-        progress_label=f"[{job.job_id}] fixed VBR {target_bitrate}",
-        progress_interval_sec=15.0,
-    )
-    if not enc.ok:
-        job.error = f"fixed VBR encode failed: {enc.stderr_tail}"
-        job.stage_timings["crf_search"] = time.monotonic() - probe_started
-        return
+    def _encode_and_score_vbr(
+        preprocess: Optional[str],
+        *,
+        out_name: str,
+        label: str,
+    ) -> tuple[Optional[str], Optional[ScoreResult], str]:
+        out = work_dir / out_name
+        enc = encode_hevc(
+            job.input_path,
+            str(out),
+            preset=preset,
+            params=recipe.params,
+            codec_mode="ABR",
+            crf=None,
+            bitrate=target_bitrate,
+            ffmpeg_bin=req.ffmpeg_bin,
+            timeout=timeout_from_deadline(probe_deadline),
+            encoder="libx265",
+            preprocess=preprocess,
+            libx265_profile=req.libx265_profile,
+            progress_reference_path=job.input_path,
+            progress_label=f"[{job.job_id}] {label}",
+            progress_interval_sec=15.0,
+        )
+        if not enc.ok:
+            return None, None, enc.stderr_tail or "encode failed"
+        score = score_candidate(
+            job.input_path,
+            str(out),
+            req.vmaf_threshold,
+            ffmpeg_bin=req.ffmpeg_bin,
+            ffprobe_bin=req.ffprobe_bin,
+            vmaf_n_subsample=req.vmaf_n_subsample,
+            vmaf_n_threads=vmaf_threads,
+            vmaf_backend=req.vmaf_backend,
+            vmaf_docker_image=req.vmaf_docker_image,
+            **_job_vmaf_gpu_kwargs(job, req),
+            codec_mode="ABR",
+            target_bitrate_mbps=target_mbps,
+            timeout=timeout_from_deadline(probe_deadline),
+        )
+        return str(out.resolve()), score, ""
 
-    score = score_candidate(
-        job.input_path,
-        str(out),
-        req.vmaf_threshold,
-        ffmpeg_bin=req.ffmpeg_bin,
-        ffprobe_bin=req.ffprobe_bin,
-        vmaf_n_subsample=req.vmaf_n_subsample,
-        vmaf_n_threads=vmaf_threads,
-        vmaf_backend=req.vmaf_backend,
-        vmaf_docker_image=req.vmaf_docker_image,
-        **_job_vmaf_gpu_kwargs(job, req),
-        codec_mode="ABR",
-        target_bitrate_mbps=target_mbps,
-        timeout=timeout_from_deadline(probe_deadline),
-    )
+    probe_started = time.monotonic()
+    chosen_preprocess: Optional[str] = proposed
+    chosen_reason = reason
+    enc_path: Optional[str] = None
+    score: Optional[ScoreResult] = None
+
+    if do_multi:
+        trial_paths: dict[Optional[str], str] = {}
+        trial_scores: dict[Optional[str], ScoreResult] = {}
+        trial_views: list[tuple[Optional[str], PreprocessScoreView]] = []
+        errors: list[str] = []
+        for cand in unique_cands:
+            tag = cand or "none"
+            path, sc, err = _encode_and_score_vbr(
+                cand,
+                out_name=f"full_vbr_{safe_label}_{tag}.mp4",
+                label=f"fixed VBR {target_bitrate} preprocess={tag}",
+            )
+            if sc is None or path is None:
+                errors.append(f"{tag}:{err}")
+                trial_views.append((cand, PreprocessScoreView(0.0, 0.0, False)))
+                continue
+            trial_paths[cand] = path
+            trial_scores[cand] = sc
+            trial_views.append((cand, _score_view_from_result(sc)))
+        if not trial_scores:
+            job.error = "fixed VBR preprocess trial failed: " + "; ".join(errors)
+            job.stage_timings["crf_search"] = time.monotonic() - probe_started
+            return
+        chosen_preprocess, chosen_reason = choose_best_preprocess(trial_views)
+        log(f"  [{job.job_id}] {chosen_reason}")
+        if chosen_preprocess not in trial_scores:
+            # Prefer any gates-ok trial, else first scored.
+            fallback = next(
+                (
+                    n
+                    for n, sc in trial_scores.items()
+                    if _score_view_from_result(sc).gates_ok
+                ),
+                next(iter(trial_scores)),
+            )
+            chosen_preprocess = fallback
+            chosen_reason = f"preprocess fallback to {fallback or 'none'}"
+        enc_path = trial_paths[chosen_preprocess]
+        score = trial_scores[chosen_preprocess]
+    else:
+        enc_path, score, err = _encode_and_score_vbr(
+            proposed,
+            out_name=f"full_vbr_{safe_label}.mp4",
+            label=f"fixed VBR {target_bitrate}",
+        )
+        if score is None or enc_path is None:
+            job.error = f"fixed VBR encode failed: {err}"
+            job.stage_timings["crf_search"] = time.monotonic() - probe_started
+            return
+
     job.stage_timings["crf_search"] = time.monotonic() - probe_started
+    job.chosen_preprocess = chosen_preprocess
+    job.preprocess_reason = chosen_reason
+    # Lock preprocess for param tune / any later encodes on this job request.
+    req.preprocess = chosen_preprocess
+
     if (
-        score.vmaf <= 0
+        score is None
+        or score.vmaf <= 0
         or not score.passed_encoding_gates
         or not score.passed_vmaf_delta_gate
     ):
-        job.error = f"fixed VBR score failed: {score.reason}"
+        job.error = f"fixed VBR score failed: {score.reason if score else 'no score'}"
         return
 
     base_txt = f"{score.vmaf_base:.2f}" if score.vmaf_base is not None else "n/a"
     log(
         f"  [{job.job_id}] fixed VBR {target_bitrate} → "
         f"vmaf_neg={score.vmaf:.2f}, base={base_txt}, "
-        f"rate={score.compression_rate:.4f}, s_f={score.s_f:.4f}"
+        f"rate={score.compression_rate:.4f}, s_f={score.s_f:.4f}, "
+        f"preprocess={chosen_preprocess or 'none'}"
     )
     job.probe_best = TrialResult(
         recipe=recipe.name,
         mode="ABR",
         crf=None,
         bitrate=target_bitrate,
-        path=str(out.resolve()),
+        path=str(enc_path),
         score=score,
         encode_ok=True,
         stage="sla_fixed_vbr",
@@ -1296,9 +1454,230 @@ def _run_param_tune_after_crf(
     probe_deadline: float,
     min_attempt_sec: float,
 ) -> None:
-    """Sequential x265 param tune + optional CRF+1, maximizing s_f."""
+    """After CRF probe: CRF-mode Phase B/C (default) or legacy sequential tune."""
     if not bool(req.param_tune):
         return
+    if bool(getattr(req, "crf_mode_tune", True)):
+        return _run_crf_mode_phase_bc_after_crf(
+            _template,
+            job,
+            req=req,
+            preset=preset,
+            vmaf_threads=vmaf_threads,
+            probe_deadline=probe_deadline,
+            min_attempt_sec=min_attempt_sec,
+        )
+    return _run_legacy_param_tune_after_crf(
+        _template,
+        job,
+        req=req,
+        preset=preset,
+        vmaf_threads=vmaf_threads,
+        probe_deadline=probe_deadline,
+        min_attempt_sec=min_attempt_sec,
+    )
+
+
+def _run_crf_mode_phase_bc_after_crf(
+    _template: CompressionRequest,
+    job: FleetVideoJob,
+    *,
+    req: CompressionRequest,
+    preset: str,
+    vmaf_threads: int,
+    probe_deadline: float,
+    min_attempt_sec: float,
+) -> None:
+    """Phase B aq×CRF ladder + Phase C lookahead sweep."""
+    if job.error or job.probe_best is None or job.recipe is None:
+        return
+    probe = job.probe_best
+    if (
+        not probe.encode_ok
+        or probe.score.s_f <= 0
+        or not probe.score.passed_encoding_gates
+        or not probe.score.passed_vmaf_delta_gate
+    ):
+        log(f"  [{job.job_id}] skip crf-mode Phase B/C: CRF probe score not usable")
+        return
+
+    work_dir = Path(job.work_dir)
+    initial_params = job.best_params or job.recipe.params
+    job.best_params = initial_params
+    base_crf = float(probe.crf if probe.crf is not None else job.chosen_crf or 0)
+    started = time.monotonic()
+    trial_counter = {"n": 0}
+    score_cache: dict[tuple[float, str], ScoreResult] = {
+        (round(base_crf, 3), initial_params): probe.score
+    }
+    path_cache: dict[tuple[float, str], str] = {
+        (round(base_crf, 3), initial_params): str(probe.path)
+    }
+
+    def evaluate(crf: float, params: str) -> CrfModeTrial:
+        left = seconds_left(probe_deadline)
+        crf_i = round_crf_for_encode(crf)
+        if left < min_attempt_sec:
+            return CrfModeTrial(
+                crf=float(crf),
+                aq_strength=0.0,
+                rc_lookahead=0,
+                params=params,
+                reason="probe budget exhausted",
+            )
+        cache_key = (round(float(crf_i), 3), str(params))
+        if cache_key in score_cache:
+            score = score_cache[cache_key]
+            return CrfModeTrial(
+                crf=float(crf_i),
+                aq_strength=0.0,
+                rc_lookahead=0,
+                params=params,
+                s_f=float(score.s_f),
+                vmaf=float(score.vmaf),
+                compression_rate=float(score.compression_rate),
+                compression_ratio=float(score.compression_ratio),
+                path=path_cache[cache_key],
+                ok=True,
+                reason="cache",
+            )
+        trial_counter["n"] += 1
+        out = work_dir / f"crfmode_t{trial_counter['n']}_crf{crf_i}.mp4"
+        enc = encode_hevc(
+            job.input_path,
+            str(out),
+            preset=preset,
+            params=params,
+            codec_mode=req.codec_mode,
+            crf=int(crf_i),
+            bitrate=None,
+            ffmpeg_bin=req.ffmpeg_bin,
+            timeout=timeout_from_deadline(probe_deadline),
+            encoder="libx265",
+            preprocess=req.preprocess,
+            libx265_profile=req.libx265_profile,
+            progress_reference_path=job.input_path,
+            progress_label=f"[{job.job_id}] crf-mode CRF{crf_i} t{trial_counter['n']}",
+            progress_interval_sec=15.0,
+        )
+        if not enc.ok:
+            return CrfModeTrial(
+                crf=float(crf_i),
+                aq_strength=0.0,
+                rc_lookahead=0,
+                params=params,
+                path=str(out),
+                reason=enc.stderr_tail or "encode failed",
+            )
+        score = score_candidate(
+            job.input_path,
+            str(out),
+            req.vmaf_threshold,
+            ffmpeg_bin=req.ffmpeg_bin,
+            ffprobe_bin=req.ffprobe_bin,
+            vmaf_n_subsample=req.vmaf_n_subsample,
+            vmaf_n_threads=vmaf_threads,
+            vmaf_backend=req.vmaf_backend,
+            vmaf_docker_image=req.vmaf_docker_image,
+            **_job_vmaf_gpu_kwargs(job, req),
+            codec_mode=req.codec_mode,
+            timeout=timeout_from_deadline(probe_deadline),
+        )
+        ok = (
+            score.vmaf > 0
+            and score.passed_encoding_gates
+            and score.passed_vmaf_delta_gate
+            and score.s_f > 0
+        )
+        path_cache[cache_key] = str(out.resolve())
+        score_cache[cache_key] = score
+        log(
+            f"  [{job.job_id}] crf-mode t{trial_counter['n']}: CRF={crf_i} "
+            f"s_f={score.s_f:.4f} vmaf={score.vmaf:.2f} rate={score.compression_rate:.4f} "
+            f"ok={ok}"
+        )
+        return CrfModeTrial(
+            crf=float(crf_i),
+            aq_strength=0.0,
+            rc_lookahead=0,
+            params=params,
+            s_f=float(score.s_f or 0.0),
+            vmaf=float(score.vmaf or 0.0),
+            compression_rate=float(score.compression_rate or 1.0),
+            compression_ratio=float(score.compression_ratio or 1.0),
+            path=path_cache[cache_key],
+            ok=ok,
+            reason=score.reason if not ok else "ok",
+        )
+
+    state = run_crf_mode_phase_bc(
+        base_crf=base_crf,
+        initial_params=initial_params,
+        initial_s_f=float(probe.score.s_f),
+        initial_vmaf=float(probe.score.vmaf),
+        initial_path=str(probe.path),
+        initial_compression_rate=float(probe.score.compression_rate),
+        initial_compression_ratio=float(probe.score.compression_ratio),
+        evaluate=evaluate,
+        vmaf_threshold=float(req.vmaf_threshold),
+        crf_min=float(req.x265_crf_floor),
+        crf_max=float(req.x265_crf_ceiling),
+        aq_min=float(req.crf_mode_aq_min),
+        aq_max=float(req.crf_mode_aq_max),
+        aq_step=float(req.crf_mode_aq_step),
+        vmaf_headroom=float(req.crf_mode_vmaf_headroom),
+        crf_compensate_steps=int(req.crf_mode_compensate_steps),
+        max_compression_rate=req.crf_mode_max_compression_rate,
+        lookahead_sweep=tuple(req.crf_mode_lookahead_sweep),
+        default_lookahead=int(req.crf_mode_lookahead_default),
+        job_id=str(job.job_id),
+    )
+    job.stage_timings["param_tune"] = time.monotonic() - started
+    job.param_tune_trials = int(state.trials)
+    job.param_tune_history = list(state.history)
+    job.chosen_crf = round_crf_for_encode(state.crf)
+    job.best_params = state.params
+    job.recipe = dc_replace(job.recipe, params=state.params)
+
+    best_key = (round(float(job.chosen_crf), 3), str(state.params))
+    best_score = score_cache.get(best_key, probe.score)
+    # Also try float key from state.crf if int round differs.
+    if best_key not in score_cache:
+        alt = (round(float(state.crf), 3), str(state.params))
+        best_score = score_cache.get(alt, best_score)
+        best_key = alt if alt in score_cache else best_key
+    best_path = path_cache.get(best_key, state.path or probe.path)
+    job.probe_best = TrialResult(
+        recipe=job.recipe.name,
+        mode=req.codec_mode,
+        crf=int(job.chosen_crf),
+        bitrate=None,
+        path=best_path,
+        score=best_score,
+        encode_ok=True,
+        stage="sla_crf_mode",
+        encoder="libx265",
+    )
+    job.nvenc_best = job.probe_best
+    log(
+        f"  [{job.job_id}] crf-mode done: trials={state.trials} "
+        f"best CRF={job.chosen_crf} aq={state.aq_strength:g} la={state.rc_lookahead} "
+        f"s_f={state.s_f:.4f} vmaf={state.vmaf:.2f}"
+    )
+    log(f"  [{job.job_id}] best x265-params={state.params}")
+
+
+def _run_legacy_param_tune_after_crf(
+    _template: CompressionRequest,
+    job: FleetVideoJob,
+    *,
+    req: CompressionRequest,
+    preset: str,
+    vmaf_threads: int,
+    probe_deadline: float,
+    min_attempt_sec: float,
+) -> None:
+    """Sequential x265 param tune + optional CRF+1, maximizing s_f."""
     if job.error or job.probe_best is None or job.recipe is None:
         return
     probe = job.probe_best
@@ -1552,7 +1931,7 @@ def _run_param_tune_after_bitrate(
             ffmpeg_bin=req.ffmpeg_bin,
             timeout=timeout_from_deadline(probe_deadline),
             encoder="libx265",
-            preprocess=req.preprocess,
+            preprocess=job.chosen_preprocess,
             libx265_profile=req.libx265_profile,
             progress_reference_path=job.input_path,
             progress_label=(
@@ -1691,14 +2070,7 @@ def _run_scene_crf_probe(
     req.max_workers = 1
     crf_min = float(req.x265_crf_floor)
     crf_max = float(req.x265_crf_ceiling)
-    recipe = select_recipes(
-        job.features,
-        req.vmaf_threshold,
-        max_recipes=1,
-        preset=req.libx265_refine_preset,
-        feature_baseline=bool(req.libx265_feature_baseline),
-        params_override=req.libx265_params,
-    )[0]
+    recipe, pack_reason = _select_crf_mode_recipe(req, job.features)
     job.recipe = recipe
     job.stage_timings["scene_samples"] = 0.0
 
@@ -1726,8 +2098,11 @@ def _run_scene_crf_probe(
     log(
         f"  [{job.job_id}] full-file CRF search: dual VMAF, preset={probe_preset}, "
         f"target VMAF {min_vmaf:.0f}, max size {req.crf_search_max_encoded_percent:.0f}%, "
-        f"CRF {crf_min:.0f}..{crf_max:.0f}, seed={seed_crf} ({seed_reason})"
+        f"CRF {crf_min:.0f}..{crf_max:.0f}, seed={seed_crf} ({seed_reason}), "
+        f"pack={pack_reason}"
     )
+    if recipe.params:
+        log(f"  [{job.job_id}] x265-params={recipe.params}")
 
     probe_started = time.monotonic()
     encoded_cache: dict[float, str] = {}
@@ -1963,14 +2338,7 @@ def _run_crf_probe_path(
     req.max_workers = 1
     crf_min = req.x265_crf_floor
     crf_max = req.x265_crf_ceiling
-    recipe = select_recipes(
-        job.features,
-        req.vmaf_threshold,
-        max_recipes=1,
-        preset=req.libx265_refine_preset,
-        feature_baseline=bool(req.libx265_feature_baseline),
-        params_override=req.libx265_params,
-    )[0]
+    recipe, pack_reason = _select_crf_mode_recipe(req, job.features)
     job.recipe = recipe
 
     probe_count = max(2, int(template.crf_candidates))
@@ -1987,7 +2355,7 @@ def _run_crf_probe_path(
     job.probe_seed = seed
     log(
         f"  [{job.job_id}] rule proxy plan CRF {crfs} "
-        f"(seed={seed}, {seed_reason})"
+        f"(seed={seed}, {seed_reason}, pack={pack_reason})"
     )
 
     windows = select_proxy_windows(

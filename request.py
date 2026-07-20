@@ -119,9 +119,18 @@ class CompressionRequest:
     # feature-derived params (request keys win on conflict).
     libx265_profile: str = "main"  # main | main10 | mainstillpicture | rext
     libx265_params: Optional[str] = None  # colon-joined -x265-params overlay
-    # Optional denoise preprocess (safe presets only; enhancement filters excluded).
-    # none | hqdn3d_light | hqdn3d_med | atadenoise_light
+    # Optional preprocess (survey set: denoise / bilateral / mild sharpen / contrast).
+    # none | hqdn3d_light | hqdn3d_med | atadenoise_light | bilateral_light |
+    # unsharp_mild | contrast_mild
     preprocess: Optional[str] = None
+    # When preprocess is unset: pick from features (VBR path).
+    preprocess_auto: bool = True
+    # Compare multiple candidates at the same bitrate and keep the best dual-VMAF
+    # / s_f result (VBR path). With a single auto pick this is none vs pick;
+    # with preprocess_sweep it evaluates the full survey set.
+    preprocess_ab: bool = True
+    # Try the full VMAF-NEG survey preprocess set at fixed bitrate (costly).
+    preprocess_sweep: bool = False
     # Round 2: add one measured light-denoise trial at the locked best CQ.
     round2_preprocess_trial: bool = False
     round2_preprocess: str = "hqdn3d_light"
@@ -161,11 +170,25 @@ class CompressionRequest:
     crf_search_probe_preset: str = "ultrafast"
     # After CRF search: sequential libx265 param tune maximizing s_f.
     # Skipped in fixed-CRF manual mode (when crf is set).
+    # When crf_mode_tune=True (default), CRF path uses aq×CRF Phase B/C instead.
     param_tune: bool = True
     param_tune_max_trials: int = 25
     param_tune_no_improve_stop: int = 10
     param_tune_vmaf_headroom: float = 2.0  # try CRF+1 when vmaf - threshold >= this
     param_tune_max_rounds: int = 3
+    # CRF mode: fixed pack (ref=16, rd=6, bframes=12, aq=1, la=50) + aq-mode rule,
+    # then Phase B aq-strength walk with CRF+1/+2 ladder, then Phase C la∈{40,60}.
+    crf_mode_tune: bool = True
+    crf_mode_pack: bool = True
+    crf_mode_aq_min: float = 0.2
+    crf_mode_aq_max: float = 2.4
+    crf_mode_aq_step: float = 0.2
+    crf_mode_vmaf_headroom: float = 2.0
+    crf_mode_compensate_steps: int = 2  # CRF± steps after each AQ trial
+    # Challenger must also beat this size rate to replace best (None = disabled).
+    crf_mode_max_compression_rate: Optional[float] = None
+    crf_mode_lookahead_default: int = 50
+    crf_mode_lookahead_sweep: tuple[int, ...] = (40, 60)
     # Legacy proxy search (mashup seconds-per-segment). Used when scene_crf_search=false.
     use_proxy: bool = True
     proxy_seconds_per_segment: float = 2.5
@@ -493,10 +516,17 @@ class CompressionRequest:
                 f"preprocess must be one of {sorted(_PREPROCESS_FILTERS)}, got {self.preprocess!r}"
             )
         self.round2_preprocess = self.round2_preprocess.lower().strip()
-        if self.round2_preprocess not in _PREPROCESS_FILTERS or self.round2_preprocess == "none":
+        _denoise_only = {
+            k
+            for k, v in _PREPROCESS_FILTERS.items()
+            if k != "none" and v is not None and (
+                k.startswith("hqdn3d") or k.startswith("atadenoise")
+            )
+        }
+        if self.round2_preprocess not in _denoise_only:
             raise ValueError(
                 "round2_preprocess must be a denoise preset "
-                f"({sorted(k for k in _PREPROCESS_FILTERS if k != 'none')}), "
+                f"({sorted(_denoise_only)}), "
                 f"got {self.round2_preprocess!r}"
             )
         if int(self.nvenc_gpu) < 0:
@@ -528,6 +558,28 @@ class CompressionRequest:
             raise ValueError("param_tune_vmaf_headroom must be >= 0")
         if int(self.param_tune_max_rounds) < 1:
             raise ValueError("param_tune_max_rounds must be >= 1")
+        if float(self.crf_mode_aq_step) <= 0:
+            raise ValueError("crf_mode_aq_step must be > 0")
+        if float(self.crf_mode_aq_min) > float(self.crf_mode_aq_max):
+            raise ValueError("crf_mode_aq_min must be <= crf_mode_aq_max")
+        if float(self.crf_mode_vmaf_headroom) < 0:
+            raise ValueError("crf_mode_vmaf_headroom must be >= 0")
+        if int(self.crf_mode_compensate_steps) < 1:
+            raise ValueError("crf_mode_compensate_steps must be >= 1")
+        if self.crf_mode_max_compression_rate is not None:
+            rate = float(self.crf_mode_max_compression_rate)
+            if not (0.0 < rate < 1.0):
+                raise ValueError(
+                    "crf_mode_max_compression_rate must be in (0, 1) or None, "
+                    f"got {self.crf_mode_max_compression_rate!r}"
+                )
+            self.crf_mode_max_compression_rate = rate
+        if int(self.crf_mode_lookahead_default) < 1:
+            raise ValueError("crf_mode_lookahead_default must be >= 1")
+        if isinstance(self.crf_mode_lookahead_sweep, list):
+            self.crf_mode_lookahead_sweep = tuple(int(x) for x in self.crf_mode_lookahead_sweep)
+        else:
+            self.crf_mode_lookahead_sweep = tuple(int(x) for x in self.crf_mode_lookahead_sweep)
         if float(self.crf_search_sample_every_sec) <= 0:
             raise ValueError("crf_search_sample_every_sec must be > 0")
         if int(self.crf_search_min_samples) < 1:

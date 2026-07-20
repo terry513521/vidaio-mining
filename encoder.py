@@ -34,22 +34,76 @@ _NVENC_CQ_RC = {"vbr", "vbr_hq"}  # CQ mode: let -cq drive quality, no bitrate c
 _NVENC_B_REF = {"disabled", "each", "middle"}
 _NVENC_MULTIPASS = {"disabled", "qres", "fullres"}
 
-# Safe preprocess presets. Denoise-only by design: enhancement filters
-# (unsharp/CLAHE/gamma/contrast) are deliberately excluded because they widen
-# base-vs-NEG VMAF and trip the validator delta gate (see arXiv:2107.04510).
+# Preprocess presets for VBR experiments (VMAF NEG survey + brave micro set).
+# Mild enhancement is allowed but must pass the dual-VMAF delta gate;
+# fleet/CLI A/B or sweep keeps only winners that clear gates.
+#
+# Brave insight from thr=85 / rate≈0.04 sweeps: unsharp_mild / contrast_mild
+# raise VMAF NEG but overshoot |base−neg|≤3. Dial strength down + try
+# denoise→micro-sharpen combos (NEG paper) and edge-aware restore filters.
 _PREPROCESS_FILTERS = {
     "none": None,
+    # Gentle denoising
     "hqdn3d_light": "hqdn3d=1.5:1.5:6:6",
     "hqdn3d_med": "hqdn3d=3:2:8:8",
+    # Prefer temporal over spatial — free bits on grain without mushing edges
+    "hqdn3d_temporal": "hqdn3d=0.8:0.6:5:4",
     "atadenoise_light": "atadenoise=0a=0.02:0b=0.04:1a=0.02:1b=0.04",
+    "vaguedenoiser_light": "vaguedenoiser=threshold=1.5:method=soft:nsteps=4",
+    # Bilateral (edge-preserving smooth)
+    "bilateral_light": "bilateral=sigmaS=1.5:sigmaR=0.08",
+    # Very mild sharpening (survey); often fails NEG delta — keep only if A/B wins
+    "unsharp_mild": "unsharp=5:5:0.35:5:5:0.0",
+    # Micro / nano sharpen — same direction as mild, sized for delta≤3
+    "unsharp_micro": "unsharp=5:5:0.18:5:5:0.0",
+    "unsharp_nano": "unsharp=3:3:0.10:3:3:0.0",
+    # Slight contrast (survey) + micro/nano dial-backs
+    "contrast_mild": "eq=contrast=1.05:brightness=0.0:saturation=1.0",
+    "contrast_micro": "eq=contrast=1.02:brightness=0.0:saturation=1.015",
+    "contrast_nano": "eq=contrast=1.012:brightness=0.0:saturation=1.008",
+    # Contrast-adaptive sharpen (often gentler delta than global unsharp)
+    "cas_micro": "cas=0.18",
+    "cas_nano": "cas=0.10",
+    # Smooth flats, slight outline restore (classic smartblur “restore”)
+    "smartblur_restore": "smartblur=1.0:-0.55:20:0.6:-0.35:20",
+    # Paper-style: mild denoise then micro edge restore
+    "denoise_unsharp": "hqdn3d=1.0:0.8:4:3,unsharp=5:5:0.16:5:5:0.0",
+    "bilateral_unsharp": "bilateral=sigmaS=1.2:sigmaR=0.06,unsharp=5:5:0.14:5:5:0.0",
+    "temporal_cas": "hqdn3d=0.8:0.6:5:4,cas=0.12",
 }
+
+# Full survey candidate list for preprocess_sweep (includes none).
+SURVEY_PREPROCESS_SWEEP: tuple[str, ...] = (
+    "none",
+    "hqdn3d_light",
+    "bilateral_light",
+    "unsharp_mild",
+    "contrast_mild",
+)
+
+# Aggressive micro-enhancement sweep aimed at higher VMAF NEG under delta≤3.
+BRAVE_PREPROCESS_SWEEP: tuple[str, ...] = (
+    "none",
+    "unsharp_micro",
+    "unsharp_nano",
+    "contrast_micro",
+    "contrast_nano",
+    "cas_micro",
+    "cas_nano",
+    "smartblur_restore",
+    "denoise_unsharp",
+    "bilateral_unsharp",
+    "hqdn3d_temporal",
+    "temporal_cas",
+    # vaguedenoiser_light omitted from default brave sweep — too slow on mashups
+)
 
 
 def resolve_preprocess_vf(preprocess: Optional[str]) -> Optional[str]:
-    """Map a safe preprocess preset name to an ffmpeg filter string.
+    """Map a preprocess preset name to an ffmpeg filter string.
 
     Returns None for 'none'/empty. Raises on unknown presets. Raw filter
-    strings are rejected to keep this denoise-only.
+    strings are rejected — use named presets only.
     """
     if preprocess is None:
         return None
@@ -100,6 +154,7 @@ def encode_hevc(
     encoder: str = "libx265",
     preprocess: Optional[str] = None,
     libx265_profile: Optional[str] = None,
+    twopass: bool = False,
     nvenc_tune: str = "hq",
     nvenc_rc: str = "vbr",
     nvenc_multipass: str = "qres",
@@ -138,8 +193,11 @@ def encode_hevc(
             t=t,
             preprocess=preprocess,
             libx265_profile=libx265_profile,
+            twopass=twopass,
             **progress_kwargs,
         )
+    if twopass:
+        raise ValueError("twopass is only supported for libx265")
     if enc in {"hevc_nvenc", "nvenc", "nvenc_hevc"}:
         return _encode_hevc_nvenc(
             input_path,
@@ -294,68 +352,103 @@ def _encode_libx265(
     t: Optional[float],
     preprocess: Optional[str] = None,
     libx265_profile: Optional[str] = None,
+    twopass: bool = False,
     progress_reference_path: Optional[str] = None,
     progress_label: Optional[str] = None,
     progress_interval_sec: float = 15.0,
 ) -> EncodeResult:
-    ffmpeg = resolve_binary("ffmpeg", ffmpeg_bin)
-    cmd = [ffmpeg, "-y", "-hide_banner"]
-
-    # Accurate seek for proxy windows: -ss after -i is slower but frame-accurate.
-    if ss is not None:
-        cmd.extend(["-ss", str(ss)])
-
-    cmd.extend(["-i", input_path])
-
-    if t is not None:
-        cmd.extend(["-t", str(t)])
-
-    pre_vf = resolve_preprocess_vf(preprocess)
-    vf = f"{pre_vf},setsar=1" if pre_vf else "setsar=1"
-    cmd.extend(
-        [
-            "-vf",
-            vf,
-            "-c:v",
-            "libx265",
-            "-preset",
-            preset,
-            "-pix_fmt",
-            "yuv420p",
-            "-tag:v",
-            "hvc1",
-            "-an",
-            "-movflags",
-            "+faststart",
-        ]
-    )
-
-    profile = (libx265_profile or "main").lower().strip()
-    if profile:
-        cmd.extend(["-profile:v", profile])
-
     mode = normalize_codec_mode(codec_mode)
-    if is_rc_mode(mode):
-        if crf is None:
-            raise ValueError("crf is required for RC mode")
-        cmd.extend(["-crf", str(crf)])
-    elif is_abr_mode(mode):
-        if not bitrate:
-            raise ValueError("bitrate is required for ABR mode")
-        cmd.extend(["-b:v", bitrate])
-    else:
-        raise ValueError(f"Unsupported codec_mode: {codec_mode}")
+    if twopass and not is_abr_mode(mode):
+        raise ValueError("twopass requires ABR mode with -b:v")
 
-    if params:
-        cmd.extend(["-x265-params", params])
+    def build_cmd(*, pass_n: Optional[int], dest: str) -> list[str]:
+        ffmpeg = resolve_binary("ffmpeg", ffmpeg_bin)
+        cmd = [ffmpeg, "-y", "-hide_banner"]
+        if ss is not None:
+            cmd.extend(["-ss", str(ss)])
+        cmd.extend(["-i", input_path])
+        if t is not None:
+            cmd.extend(["-t", str(t)])
 
-    cmd.append(output_path)
+        pre_vf = resolve_preprocess_vf(preprocess)
+        vf = f"{pre_vf},setsar=1" if pre_vf else "setsar=1"
+        cmd.extend(
+            [
+                "-vf",
+                vf,
+                "-c:v",
+                "libx265",
+                "-preset",
+                preset,
+                "-pix_fmt",
+                "yuv420p",
+                "-tag:v",
+                "hvc1",
+                "-an",
+            ]
+        )
+        if pass_n != 1:
+            cmd.extend(["-movflags", "+faststart"])
+
+        profile = (libx265_profile or "main").lower().strip()
+        if profile:
+            cmd.extend(["-profile:v", profile])
+
+        if is_rc_mode(mode):
+            if crf is None:
+                raise ValueError("crf is required for RC mode")
+            cmd.extend(["-crf", str(crf)])
+        elif is_abr_mode(mode):
+            if not bitrate:
+                raise ValueError("bitrate is required for ABR mode")
+            cmd.extend(["-b:v", bitrate])
+        else:
+            raise ValueError(f"Unsupported codec_mode: {codec_mode}")
+
+        x265_params = params or ""
+        if pass_n is not None:
+            # libx265 2-pass via ffmpeg -pass; also stamp pass=N in x265-params.
+            pass_kv = f"pass={pass_n}"
+            x265_params = f"{x265_params}:{pass_kv}" if x265_params else pass_kv
+            cmd.extend(["-pass", str(pass_n)])
+        if x265_params:
+            cmd.extend(["-x265-params", x265_params])
+        cmd.append(dest)
+        return cmd
+
+    if not twopass:
+        return _run_ffmpeg(
+            build_cmd(pass_n=None, dest=output_path),
+            output_path,
+            timeout,
+            progress_reference_path=progress_reference_path,
+            progress_label=progress_label,
+            progress_interval_sec=progress_interval_sec,
+        )
+
+    # Pass 1 → null sink; pass 2 → real output. Stats land in ffmpeg2pass-0.log.
+    pass1 = build_cmd(pass_n=1, dest="/dev/null")
+    pass1 = pass1[:-1] + ["-f", "null", "/dev/null"]
+
+    label1 = f"{progress_label} pass1" if progress_label else "libx265 pass1"
+    r1 = _run_ffmpeg(
+        pass1,
+        "/dev/null",
+        timeout,
+        progress_reference_path=progress_reference_path,
+        progress_label=label1,
+        progress_interval_sec=progress_interval_sec,
+    )
+    if not r1.ok:
+        return r1
+
+    label2 = f"{progress_label} pass2" if progress_label else "libx265 pass2"
     return _run_ffmpeg(
-        cmd,
+        build_cmd(pass_n=2, dest=output_path),
         output_path,
         timeout,
         progress_reference_path=progress_reference_path,
-        progress_label=progress_label,
+        progress_label=label2,
         progress_interval_sec=progress_interval_sec,
     )
 

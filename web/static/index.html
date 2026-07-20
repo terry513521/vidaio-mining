@@ -287,6 +287,88 @@
       gap: 12px;
       margin-bottom: 12px;
     }
+    .analyze-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .analyze-panel h2 {
+      margin: 0 0 4px;
+      font-size: 1.05rem;
+    }
+    .analyze-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: end;
+      margin: 12px 0;
+    }
+    .analyze-status {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: 8px 0;
+    }
+    .analyze-status.running { color: var(--accent); }
+    .analyze-status.done { color: var(--good); }
+    .analyze-status.error { color: var(--warn); }
+    .analyze-results { display: grid; gap: 14px; }
+    .chal-block {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .chal-block h3 { margin: 0 0 10px; font-size: 0.95rem; }
+    .uid-block {
+      border-top: 1px solid var(--border);
+      padding-top: 10px;
+      margin-top: 10px;
+    }
+    .uid-block:first-of-type {
+      border-top: none;
+      padding-top: 0;
+      margin-top: 0;
+    }
+    .uid-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 8px;
+      font-size: 0.9rem;
+    }
+    .uid-head strong { color: var(--accent); }
+    .score-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.8rem;
+    }
+    .score-table th, .score-table td {
+      text-align: left;
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .score-table th { color: var(--muted); font-weight: 600; }
+    .score-table td.fail { color: var(--warn); }
+    .score-table td.ok { color: var(--good); }
+    .analyze-paste {
+      width: 100%;
+      min-height: 140px;
+      margin-top: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+      resize: vertical;
+    }
+    .pill.err strong { color: var(--warn); }
+    .pill.wide { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .field-wide {
       grid-column: 1 / -1;
     }
@@ -368,6 +450,35 @@
         </div>
         <pre id="fetch-terminal" class="compress-terminal"></pre>
       </div>
+    </section>
+
+    <section class="analyze-panel">
+      <h2>Validator score log</h2>
+      <div class="sub">Fetch current validator <code>output.log</code> from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB</a> (same source as challenge videos) and group scores by UID → video</div>
+      <div class="analyze-row">
+        <div class="field">
+          <label for="analyze-codec">Codec</label>
+          <select id="analyze-codec">
+            <option value="all">all</option>
+            <option value="hevc" selected>hevc</option>
+            <option value="av1">av1</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="analyze-uids">UID filter</label>
+          <input id="analyze-uids" type="text" placeholder="e.g. 66,98,112" />
+        </div>
+        <div class="field">
+          <label class="check" style="margin-top:22px;">
+            <input id="analyze-failures" type="checkbox" />
+            Include failures
+          </label>
+        </div>
+        <button id="analyze-btn" type="button">Analyze from WandB</button>
+        <button id="analyze-clear" type="button">Clear</button>
+      </div>
+      <div class="analyze-status" id="analyze-status">Ready</div>
+      <div class="analyze-results" id="analyze-results"></div>
     </section>
 
     <section class="compress-panel">
@@ -655,6 +766,8 @@
       };
       if (encoder === "libx265") {
         params.libx265_profile = document.getElementById("libx265-profile").value;
+        params.libx265_crf_min = params.crf_min;
+        params.libx265_crf_max = params.crf_max;
         const x265 = document.getElementById("libx265-params").value.trim();
         if (x265) params.libx265_params = x265;
       } else {
@@ -828,12 +941,13 @@
         : (req.crf_min != null && req.crf_max != null ? `${req.crf_min}–${req.crf_max}` : null);
       const pills = [
         ["Job", item.job_id || "—"],
+        ["Strategy", item.strategy || enc.strategy || "—"],
         ["Encoder", req.encoder || enc.encoder || "—"],
         ["Codec Mode", codecMode || "—"],
         ...(isBitrateMode ? [["Target Bitrate", req.target_bitrate || "—"]] : []),
         ["Preset", req.preset || "—"],
         ["Profile", req.libx265_profile || "—"],
-        ["CRF", crfValue != null ? crfValue : "—"],
+        ["CRF", item.chosen_crf != null ? item.chosen_crf : (crfValue != null ? crfValue : "—")],
         ["Final Score", item.final_score != null ? item.final_score.toFixed(4) : "—"],
         ["VMAF", item.vmaf != null ? item.vmaf.toFixed(2) : "—"],
         ["Compression Rate", item.compression_rate != null ? item.compression_rate.toFixed(4) : "—"],
@@ -841,13 +955,17 @@
         ["Avg Bitrate", item.avg_bitrate_mbps != null ? `${item.avg_bitrate_mbps.toFixed(3)} Mbps` : "—"],
         ["Elapsed", item.elapsed_sec != null ? `${item.elapsed_sec.toFixed(1)}s` : "—"],
       ];
+      if (item.error) {
+        pills.push(["Error", item.error]);
+      }
       if (req.libx265_params) {
         pills.push(["x265-params", req.libx265_params]);
       }
       for (const [label, value] of pills) {
         const el = document.createElement("div");
-        el.className = "pill" + (label === "x265-params" ? " wide" : "");
-        if (label === "x265-params") el.title = String(value);
+        el.className = "pill" + (label === "x265-params" || label === "Error" ? " wide" : "")
+          + (label === "Error" ? " err" : "");
+        if (label === "x265-params" || label === "Error") el.title = String(value);
         el.innerHTML = `${label}: <strong>${value}</strong>`;
         videoStats.appendChild(el);
       }
@@ -1042,6 +1160,169 @@
       }
     }
 
+    let analyzePollTimer = null;
+
+    function setAnalyzeStatus(msg, cls = "") {
+      const el = document.getElementById("analyze-status");
+      el.textContent = msg;
+      el.className = `analyze-status ${cls}`.trim();
+    }
+
+    async function clearAnalyze() {
+      if (analyzePollTimer) {
+        clearTimeout(analyzePollTimer);
+        analyzePollTimer = null;
+      }
+      document.getElementById("analyze-uids").value = "";
+      document.getElementById("analyze-failures").checked = false;
+      document.getElementById("analyze-results").innerHTML = "";
+      document.getElementById("analyze-btn").disabled = false;
+      try {
+        await fetch("/api/analyze-clear", { method: "POST" });
+      } catch (err) {
+        console.error(err);
+      }
+      setAnalyzeStatus("Ready");
+    }
+
+    function fmtNum(v, digits = 4) {
+      if (v == null || Number.isNaN(Number(v))) return "—";
+      return Number(v).toFixed(digits);
+    }
+
+    function renderAnalyzeResults(data) {
+      const root = document.getElementById("analyze-results");
+      root.innerHTML = "";
+      const challenges = data.challenges || [];
+      if (!challenges.length) {
+        root.innerHTML = '<div class="empty">No matching score lines</div>';
+        return;
+      }
+      for (const chal of challenges) {
+        const block = document.createElement("div");
+        block.className = "chal-block";
+        block.innerHTML = `<h3>${chal.codec} · ${chal.mode} · thr ${chal.vmaf_threshold} · ${chal.uids.length} UID(s)</h3>`;
+        for (const uid of chal.uids) {
+          const uidEl = document.createElement("div");
+          uidEl.className = "uid-block";
+          const head = document.createElement("div");
+          head.className = "uid-head";
+          head.innerHTML = `<strong>UID ${uid.uid}</strong>
+            <span class="sub">videos=${uid.videos}</span>
+            <span class="sub">mean_final=${fmtNum(uid.mean_final)}</span>
+            <span class="sub">max=${fmtNum(uid.max_final)}</span>
+            <span class="sub">VMAF_NEG=${fmtNum(uid.mean_vmaf_neg, 2)}</span>
+            <span class="sub">rate=${fmtNum(uid.mean_rate)}</span>
+            <span class="sub">ok=${uid.successes}/${uid.videos}</span>`;
+          uidEl.appendChild(head);
+          const table = document.createElement("table");
+          table.className = "score-table";
+          table.innerHTML = `<thead><tr>
+            <th>#</th><th>video</th><th>final</th><th>VMAF NEG</th><th>rate</th><th>ratio</th>
+            <th>bitrate</th><th>bpp</th><th>status</th>
+          </tr></thead>`;
+          const tbody = document.createElement("tbody");
+          (uid.rows || []).forEach((row, i) => {
+            const tr = document.createElement("tr");
+            const ok = row.success;
+            const vid = row.video_id || (row.video_idx != null ? `#${row.video_idx}` : "—");
+            tr.innerHTML = `<td>${i + 1}</td>
+              <td title="${row.video_url || ""}">${vid}</td>
+              <td>${fmtNum(row.final)}</td>
+              <td>${fmtNum(row.vmaf_neg, 2)}</td>
+              <td>${fmtNum(row.compression_rate)}</td>
+              <td>${row.compression_ratio != null ? Number(row.compression_ratio).toFixed(2) + "x" : "—"}</td>
+              <td>${row.bitrate_mbps != null ? Number(row.bitrate_mbps).toFixed(3) + "M" : "—"}</td>
+              <td>${row.dist_bpp != null ? Number(row.dist_bpp).toFixed(4) : (row.ref_bpp != null ? Number(row.ref_bpp).toFixed(4) : "—")}</td>
+              <td class="${ok ? "ok" : "fail"}">${row.status || (ok ? "ok" : "fail")}</td>`;
+            tbody.appendChild(tr);
+          });
+          table.appendChild(tbody);
+          uidEl.appendChild(table);
+          block.appendChild(uidEl);
+        }
+        root.appendChild(block);
+      }
+    }
+
+    async function pollAnalyzeStatus() {
+      try {
+        const res = await fetch("/api/analyze-status");
+        const data = await res.json();
+        const cls = data.running
+          ? "running"
+          : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setAnalyzeStatus(data.message || (data.running ? "Working…" : "Ready"), cls);
+        if (data.result) renderAnalyzeResults(data.result);
+        if (data.running) {
+          analyzePollTimer = setTimeout(pollAnalyzeStatus, 1000);
+          return;
+        }
+        analyzePollTimer = null;
+        document.getElementById("analyze-btn").disabled = false;
+        if (data.phase === "error" && !data.result) {
+          document.getElementById("analyze-results").innerHTML = "";
+        }
+      } catch (err) {
+        console.error(err);
+        analyzePollTimer = null;
+        document.getElementById("analyze-btn").disabled = false;
+        setAnalyzeStatus(`Analyze failed: ${err}`, "error");
+      }
+    }
+
+    async function initAnalyzeMonitor() {
+      try {
+        const res = await fetch("/api/analyze-status");
+        const data = await res.json();
+        if (!data.running && !data.result && data.phase === "idle") return;
+        const cls = data.running
+          ? "running"
+          : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setAnalyzeStatus(data.message || "Ready", cls);
+        if (data.result) renderAnalyzeResults(data.result);
+        if (data.running) {
+          document.getElementById("analyze-btn").disabled = true;
+          pollAnalyzeStatus();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    async function runAnalyze() {
+      const btn = document.getElementById("analyze-btn");
+      btn.disabled = true;
+      setAnalyzeStatus("Starting WandB fetch…", "running");
+      document.getElementById("analyze-results").innerHTML = "";
+      const body = {
+        source: "wandb",
+        codec: document.getElementById("analyze-codec").value,
+        uids: document.getElementById("analyze-uids").value.trim(),
+        failures_only: document.getElementById("analyze-failures").checked,
+      };
+      try {
+        const res = await fetch("/api/analyze-log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setAnalyzeStatus(data.error || "Analyze failed", "error");
+          btn.disabled = false;
+          return;
+        }
+        if (data.status) {
+          setAnalyzeStatus(data.status.message || "Working…", "running");
+        }
+        pollAnalyzeStatus();
+      } catch (err) {
+        setAnalyzeStatus(`Analyze failed: ${err}`, "error");
+        btn.disabled = false;
+      }
+    }
+
     videoSelect.addEventListener("change", () => selectVideo(videoSelect.value));
     document.getElementById("compressed-only").addEventListener("change", () => populateSelect(videoSelect.value));
     document.getElementById("fetch-challenges").addEventListener("click", startFetch);
@@ -1053,12 +1334,15 @@
     });
     document.getElementById("video-checklist").addEventListener("change", updateSelectedCount);
     document.getElementById("compress-btn").addEventListener("click", startCompress);
+    document.getElementById("analyze-btn").addEventListener("click", runAnalyze);
+    document.getElementById("analyze-clear").addEventListener("click", clearAnalyze);
     toggleTargetBitrateField();
     renderX265DetailGrid();
     loadEncodeDefaults();
     bindSync();
     initFetchMonitor();
     initCompressMonitor();
+    initAnalyzeMonitor();
     loadVideos();
     refreshSystem();
     setInterval(refreshSystem, 3000);

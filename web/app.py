@@ -12,20 +12,34 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+from dataclasses import asdict
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from statistics import mean
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, parse_qs
 
 import psutil
 
 ROOT = Path(__file__).resolve().parent.parent
+WORKSPACE = ROOT.parent
 STATIC = Path(__file__).resolve().parent / "static"
 COMPRESSION_DIR = ROOT / "s3_videos" / "compression"
+VIDEO_DIR = WORKSPACE / "video"
 REQUEST_JSON = ROOT / "request.json"
 BATCH_RESULTS = ROOT / "work_fleet" / "batch_results.json"
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from analyze_compression_log import (  # noqa: E402
+    filter_scores,
+    parse_log,
+    parse_log_lines,
+    parse_uid_args,
+)
 
 HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 PORT = int(os.environ.get("WEB_PORT", "8082"))
@@ -76,6 +90,17 @@ _compress_status: dict[str, Any] = {
     "log": "",
 }
 
+_analyze_lock = threading.Lock()
+_analyze_status: dict[str, Any] = {
+    "running": False,
+    "phase": "idle",
+    "message": "",
+    "wandb_run": None,
+    "errors": [],
+    "params": {},
+    "result": None,
+}
+
 
 def _append_compress_log(line: str) -> None:
     with _compress_lock:
@@ -117,8 +142,14 @@ def _fmt_bytes(n: int | None) -> str:
 
 
 def _resolve_under(base: Path, rel: str) -> Path | None:
-    rel = rel.lstrip("./")
-    candidate = (base / rel).resolve()
+    text = str(rel).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if path.is_absolute():
+        candidate = path.resolve()
+    else:
+        candidate = (base / text.lstrip("./")).resolve()
     try:
         candidate.relative_to(base.resolve())
     except ValueError:
@@ -126,20 +157,55 @@ def _resolve_under(base: Path, rel: str) -> Path | None:
     return candidate
 
 
-def _load_jobs_by_input() -> dict[str, dict[str, Any]]:
+def _safe_media_file(raw: str | Path | None) -> Path | None:
+    """Resolve a media path under the mining repo or workspace."""
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (ROOT / text.lstrip("./")).resolve()
+    else:
+        path = path.resolve()
+    for base in (ROOT.resolve(), WORKSPACE.resolve()):
+        try:
+            path.relative_to(base)
+        except ValueError:
+            continue
+        if path.is_file():
+            return path
+        return None
+    return None
+
+
+def _load_jobs() -> list[dict[str, Any]]:
     data = _read_json(REQUEST_JSON)
     if not isinstance(data, dict):
-        return {}
+        return []
     jobs = data.get("jobs") or []
+    return [job for job in jobs if isinstance(job, dict)]
+
+
+def _load_jobs_by_input() -> dict[str, dict[str, Any]]:
     mapping: dict[str, dict[str, Any]] = {}
-    for job in jobs:
-        if not isinstance(job, dict):
-            continue
+    for job in _load_jobs():
         input_path = job.get("input_path") or ""
         name = Path(str(input_path)).name
         if name:
             mapping[name] = job
+        job_id = str(job.get("id") or "").strip()
+        if job_id:
+            mapping[job_id] = job
+            # Also map common aliases: job v1 <-> file 1.mp4
+            if job_id.startswith("v") and job_id[1:].isdigit():
+                mapping[f"{job_id[1:]}.mp4"] = job
     return mapping
+
+
+def _original_path_for_job(job: dict[str, Any]) -> Path | None:
+    return _safe_media_file(job.get("input_path"))
 
 
 def _load_batch_by_job() -> dict[str, dict[str, Any]]:
@@ -235,6 +301,16 @@ _REQUEST_PARAM_KEYS = (
     "param_tune_no_improve_stop",
     "param_tune_vmaf_headroom",
     "param_tune_max_rounds",
+    "crf_mode_tune",
+    "crf_mode_pack",
+    "crf_mode_aq_min",
+    "crf_mode_aq_max",
+    "crf_mode_aq_step",
+    "crf_mode_vmaf_headroom",
+    "crf_mode_compensate_steps",
+    "crf_mode_max_compression_rate",
+    "crf_mode_lookahead_default",
+    "crf_mode_lookahead_sweep",
     "time_budget_sec",
     "final_encode_reserve_sec",
     "probe_min_budget_sec",
@@ -298,6 +374,11 @@ def encode_defaults() -> dict[str, Any]:
         out["libx265_profile"] = data["profile"]
     if "x265_params" in data and "libx265_params" not in out:
         out["libx265_params"] = data["x265_params"]
+    # UI uses crf_min/max; fleet request.json often uses libx265_crf_min/max.
+    if "crf_min" not in out and "libx265_crf_min" in out:
+        out["crf_min"] = out["libx265_crf_min"]
+    if "crf_max" not in out and "libx265_crf_max" in out:
+        out["crf_max"] = out["libx265_crf_max"]
     return out
 
 
@@ -386,46 +467,97 @@ def _compressed_path_for_job(job: dict[str, Any], batch: dict[str, Any] | None) 
     candidates: list[Path] = []
     output_path = job.get("output_path")
     if output_path:
-        p = _resolve_under(ROOT, str(output_path))
+        p = _safe_media_file(str(output_path))
         if p:
             candidates.append(p)
+        # Also try unresolved path under ROOT (may not exist yet).
+        unresolved = _resolve_under(ROOT, str(output_path))
+        if unresolved:
+            candidates.append(unresolved)
 
     if batch:
         best = batch.get("best") or {}
-        best_path = best.get("path")
-        if best_path:
-            p = _resolve_under(ROOT, str(best_path))
-            if p:
-                candidates.append(p)
-        output_path = batch.get("output_path")
-        if output_path:
-            p = _resolve_under(ROOT, str(output_path))
+        for key in ("path", "output_path"):
+            raw = best.get(key) if key == "path" else batch.get(key)
+            if not raw:
+                continue
+            p = _safe_media_file(str(raw))
             if p:
                 candidates.append(p)
 
     job_id = str(job.get("id") or "")
-    if job_id:
-        thr = None
-        if batch and batch.get("vmaf_threshold") is not None:
+    thr = None
+    if batch and batch.get("vmaf_threshold") is not None:
+        try:
             thr = str(int(batch["vmaf_threshold"]))
-        elif job.get("vmaf_threshold") is not None:
+        except (TypeError, ValueError):
+            thr = None
+    elif job.get("vmaf_threshold") is not None:
+        try:
             thr = str(int(job["vmaf_threshold"]))
-        else:
-            shared = _shared_request_params()
-            if "vmaf_threshold" in shared:
-                try:
-                    thr = str(int(shared["vmaf_threshold"]))
-                except (TypeError, ValueError):
-                    thr = None
+        except (TypeError, ValueError):
+            thr = None
+    else:
+        shared = _shared_request_params()
+        if "vmaf_threshold" in shared:
+            try:
+                thr = str(int(shared["vmaf_threshold"]))
+            except (TypeError, ValueError):
+                thr = None
+
+    if job_id:
         for name in ("final_x265.mp4", "final_nvenc_fallback.mp4"):
             if thr:
                 candidates.append(ROOT / "work_fleet" / thr / job_id / name)
             candidates.append(ROOT / "work_fleet" / job_id / name)
+        # Fleet CLI writes output/fleet/<thr>/<job_id>.mp4
+        if thr:
+            candidates.append(ROOT / "output" / "fleet" / thr / f"{job_id}.mp4")
+        candidates.append(ROOT / "output" / "fleet" / f"{job_id}.mp4")
 
+    seen: set[str] = set()
     for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
         if path.is_file():
             return path
     return None
+
+
+def _catalog_entry(
+    *,
+    name: str,
+    original: Path,
+    job: dict[str, Any] | None,
+    batch: dict[str, Any] | None,
+    shared_request: dict[str, Any],
+) -> dict[str, Any]:
+    job = job or {}
+    job_id = str(job.get("id") or "") or None
+    compressed = _compressed_path_for_job(job, batch) if job else None
+    best = (batch or {}).get("best") or {}
+    return {
+        "name": name,
+        "job_id": job_id,
+        "original_size": _file_size(original),
+        "original_size_human": _fmt_bytes(_file_size(original)),
+        "compressed_size": _file_size(compressed),
+        "compressed_size_human": _fmt_bytes(_file_size(compressed)),
+        "has_compressed": compressed is not None,
+        "final_score": best.get("s_f"),
+        "vmaf": best.get("vmaf"),
+        "compression_rate": best.get("compression_rate"),
+        "compression_ratio": best.get("compression_ratio"),
+        "avg_bitrate_mbps": best.get("measured_bitrate_mbps"),
+        "elapsed_sec": (batch or {}).get("elapsed_sec"),
+        "strategy": (batch or {}).get("strategy"),
+        "chosen_crf": (batch or {}).get("chosen_crf") or best.get("crf"),
+        "error": (batch or {}).get("error") or None,
+        "request_params": _request_params_for_job(job, shared_request) if job else shared_request,
+        "encode_params": _encode_params_from_result(batch),
+    }
 
 
 def build_catalog() -> list[dict[str, Any]]:
@@ -433,36 +565,58 @@ def build_catalog() -> list[dict[str, Any]]:
     batch_by_job = _load_batch_by_job()
     shared_request = _shared_request_params()
     entries: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
 
-    if not COMPRESSION_DIR.is_dir():
-        return entries
-
-    for original in sorted(COMPRESSION_DIR.glob("*.mp4")):
-        job = jobs_by_input.get(original.name, {})
+    # Prefer request.json jobs (fleet inputs under /workspace/video, etc.).
+    for job in _load_jobs():
+        original = _original_path_for_job(job)
+        if original is None:
+            continue
+        name = original.name
+        if name in seen_names:
+            continue
+        seen_names.add(name)
         job_id = str(job.get("id") or "")
         batch = batch_by_job.get(job_id) if job_id else None
-        compressed = _compressed_path_for_job(job, batch) if job else None
-        best = (batch or {}).get("best") or {}
-
         entries.append(
-            {
-                "name": original.name,
-                "job_id": job_id or None,
-                "original_size": _file_size(original),
-                "original_size_human": _fmt_bytes(_file_size(original)),
-                "compressed_size": _file_size(compressed),
-                "compressed_size_human": _fmt_bytes(_file_size(compressed)),
-                "has_compressed": compressed is not None,
-                "final_score": best.get("s_f"),
-                "vmaf": best.get("vmaf"),
-                "compression_rate": best.get("compression_rate"),
-                "compression_ratio": best.get("compression_ratio"),
-                "avg_bitrate_mbps": best.get("measured_bitrate_mbps"),
-                "elapsed_sec": (batch or {}).get("elapsed_sec"),
-                "request_params": _request_params_for_job(job, shared_request) if job else shared_request,
-                "encode_params": _encode_params_from_result(batch),
-            }
+            _catalog_entry(
+                name=name,
+                original=original,
+                job=job,
+                batch=batch,
+                shared_request=shared_request,
+            )
         )
+
+    # Also include WandB challenge downloads if present.
+    if COMPRESSION_DIR.is_dir():
+        for original in sorted(COMPRESSION_DIR.glob("*.mp4")):
+            if original.name in seen_names:
+                continue
+            seen_names.add(original.name)
+            job = jobs_by_input.get(original.name, {})
+            job_id = str(job.get("id") or "")
+            batch = batch_by_job.get(job_id) if job_id else None
+            entries.append(
+                _catalog_entry(
+                    name=original.name,
+                    original=original,
+                    job=job or None,
+                    batch=batch,
+                    shared_request=shared_request,
+                )
+            )
+
+    # Natural-ish order: 1.mp4 before 10.mp4 when numeric.
+    def _sort_key(item: dict[str, Any]) -> tuple[int, str]:
+        stem = Path(item["name"]).stem
+        if stem.isdigit():
+            return (0, f"{int(stem):08d}")
+        if stem.startswith("v") and stem[1:].isdigit():
+            return (0, f"{int(stem[1:]):08d}")
+        return (1, item["name"].lower())
+
+    entries.sort(key=_sort_key)
     return entries
 
 
@@ -563,7 +717,34 @@ def _find_original(name: str) -> Path | None:
     path = COMPRESSION_DIR / safe
     if path.is_file():
         return path
+    jobs = _load_jobs_by_input()
+    job = jobs.get(safe)
+    if job:
+        found = _original_path_for_job(job)
+        if found is not None:
+            return found
+    # Direct lookup under workspace/video (fleet inputs).
+    direct = VIDEO_DIR / safe
+    if direct.is_file():
+        return direct
     return None
+
+
+def _find_compressed(name: str) -> Path | None:
+    safe = Path(unquote(name)).name
+    jobs = _load_jobs_by_input()
+    job = jobs.get(safe)
+    if not job:
+        # Try job id form when media name is 1.mp4 but job is v1
+        stem = Path(safe).stem
+        if stem.isdigit():
+            job = jobs.get(f"v{stem}")
+        elif safe.startswith("v"):
+            job = jobs.get(safe)
+    if not job:
+        return None
+    batch = _load_batch_by_job().get(str(job.get("id") or ""))
+    return _compressed_path_for_job(job, batch)
 
 
 def _wandb_graphql(query: str, timeout: float = 30.0) -> dict[str, Any]:
@@ -914,6 +1095,13 @@ def run_compression_sync(
             "-r",
             str(req_path),
             "--local",
+            "--force",
+            "--work-root",
+            "work_fleet",
+            "--output-dir",
+            "output/fleet",
+            "--results",
+            "work_fleet/batch_results.json",
             f"--limit={len(video_names)}",
         ]
         with _compress_lock:
@@ -992,16 +1180,255 @@ def compress_status() -> dict[str, Any]:
         return dict(_compress_status)
 
 
-def _find_compressed(name: str) -> Path | None:
-    original = _find_original(name)
-    if original is None:
+def _allowed_log_roots() -> list[Path]:
+    return [ROOT.resolve(), ROOT.parent.resolve()]
+
+
+def _safe_log_path(raw: str) -> Path | None:
+    text = (raw or "").strip()
+    if not text:
         return None
-    jobs = _load_jobs_by_input()
-    job = jobs.get(original.name)
-    if not job:
+    path = Path(text).expanduser()
+    if not path.is_absolute():
+        path = (ROOT / path).resolve()
+    else:
+        path = path.resolve()
+    for base in _allowed_log_roots():
+        try:
+            path.relative_to(base)
+            break
+        except ValueError:
+            continue
+    else:
         return None
-    batch = _load_batch_by_job().get(str(job.get("id") or ""))
-    return _compressed_path_for_job(job, batch)
+    if not path.is_file():
+        return None
+    return path
+
+
+def discover_log_paths() -> list[dict[str, Any]]:
+    candidates: list[Path] = [
+        ROOT.parent / "files_output (3).log",
+        ROOT / "wandb_output.log",
+        *sorted(ROOT.parent.glob("files_output*.log")),
+        *sorted(ROOT.glob("*.log")),
+        *sorted(ROOT.glob("wandb*/**/output.log")),
+    ]
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        key = str(resolved)
+        if key in seen or not resolved.is_file():
+            continue
+        if _safe_log_path(key) is None:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "path": key,
+                "name": resolved.name,
+                "size": resolved.stat().st_size,
+                "size_human": _fmt_bytes(resolved.stat().st_size),
+                "mtime": datetime.fromtimestamp(
+                    resolved.stat().st_mtime, tz=timezone.utc
+                ).isoformat(),
+            }
+        )
+    out.sort(key=lambda item: item["mtime"], reverse=True)
+    return out
+
+
+def analyze_validator_log(
+    *,
+    path: Path | None = None,
+    text: str | None = None,
+    codec: str | None = None,
+    uids: list[int] | None = None,
+    failures_only: bool = False,
+) -> dict[str, Any]:
+    if text is not None:
+        log_text = text
+        source = "paste"
+        source_path = None
+        _challenges, scores = parse_log_lines(log_text.splitlines())
+    elif path is not None:
+        source = "file"
+        source_path = str(path)
+        _challenges, scores = parse_log(str(path))
+    else:
+        raise ValueError("path or text is required")
+
+    rows = filter_scores(
+        scores,
+        codec=codec or None,
+        include_failures=failures_only,
+        uids=uids or None,
+    )
+
+    # Group: challenge -> uid -> videos (uids ranked by mean final desc)
+    by_chal: dict[tuple[str, str, float], dict[int, list[Any]]] = {}
+    chal_order: list[tuple[str, str, float]] = []
+    for row in rows:
+        key = (row.codec, row.mode, float(row.vmaf_threshold))
+        if key not in by_chal:
+            by_chal[key] = {}
+            chal_order.append(key)
+        by_chal[key].setdefault(row.uid, []).append(row)
+
+    challenges: list[dict[str, Any]] = []
+    for codec_name, mode, thr in chal_order:
+        uid_map = by_chal[(codec_name, mode, thr)]
+        ranked_uids = sorted(
+            uid_map.keys(),
+            key=lambda u: (-mean(x.final for x in uid_map[u]), u),
+        )
+        uid_blocks: list[dict[str, Any]] = []
+        for uid in ranked_uids:
+            uid_rows = uid_map[uid]
+            uid_blocks.append(
+                {
+                    "uid": uid,
+                    "videos": len(uid_rows),
+                    "mean_final": mean(r.final for r in uid_rows),
+                    "max_final": max(r.final for r in uid_rows),
+                    "mean_vmaf_neg": mean(r.vmaf_neg for r in uid_rows),
+                    "mean_rate": mean(r.compression_rate for r in uid_rows),
+                    "successes": sum(1 for r in uid_rows if r.success),
+                    "rows": [asdict(r) for r in uid_rows],
+                }
+            )
+        challenges.append(
+            {
+                "codec": codec_name,
+                "mode": mode,
+                "vmaf_threshold": thr,
+                "uids": uid_blocks,
+            }
+        )
+
+    return {
+        "source": source,
+        "path": source_path,
+        "total_scores": len(scores),
+        "filtered": len(rows),
+        "codec_filter": codec or None,
+        "uid_filter": uids or None,
+        "failures_only": failures_only,
+        "challenges": challenges,
+    }
+
+
+def analyze_status() -> dict[str, Any]:
+    with _analyze_lock:
+        return dict(_analyze_status)
+
+
+def clear_analyze_status() -> dict[str, Any]:
+    global _analyze_status
+    with _analyze_lock:
+        if _analyze_status.get("running"):
+            return {"cleared": False, "status": dict(_analyze_status)}
+        _analyze_status = {
+            "running": False,
+            "phase": "idle",
+            "message": "",
+            "wandb_run": None,
+            "errors": [],
+            "params": {},
+            "result": None,
+        }
+        return {"cleared": True, "status": dict(_analyze_status)}
+
+
+def run_analyze_wandb_sync(
+    *,
+    codec: str | None,
+    uids: list[int] | None,
+    failures_only: bool,
+) -> dict[str, Any]:
+    global _analyze_status
+    with _analyze_lock:
+        if _analyze_status["running"]:
+            return dict(_analyze_status)
+        _analyze_status = {
+            "running": True,
+            "phase": "fetching_log",
+            "message": f"Fetching WandB log from {WANDB_ENTITY}/{WANDB_PROJECT}…",
+            "wandb_run": None,
+            "errors": [],
+            "params": {
+                "codec": codec,
+                "uids": uids or [],
+                "failures_only": failures_only,
+            },
+            "result": None,
+        }
+
+    try:
+        run_name, log_url, log_text = _wandb_discover_output_log()
+        cache_path = ROOT / "wandb_output.log"
+        cache_path.write_text(log_text, encoding="utf-8")
+        with _analyze_lock:
+            _analyze_status["wandb_run"] = run_name
+            _analyze_status["phase"] = "analyzing"
+            _analyze_status["message"] = (
+                f"Analyzing {run_name} ({len(log_text):,} bytes)…"
+            )
+
+        result = analyze_validator_log(
+            text=log_text,
+            codec=codec,
+            uids=uids,
+            failures_only=failures_only,
+        )
+        result["wandb_run"] = run_name
+        result["log_url"] = log_url.split("?")[0]
+        result["cached_path"] = str(cache_path)
+
+        with _analyze_lock:
+            _analyze_status["running"] = False
+            _analyze_status["phase"] = "done"
+            _analyze_status["result"] = result
+            _analyze_status["message"] = (
+                f"{result['filtered']} / {result['total_scores']} scores "
+                f"from {run_name}"
+            )
+        return dict(_analyze_status)
+    except Exception as exc:  # noqa: BLE001
+        with _analyze_lock:
+            _analyze_status["running"] = False
+            _analyze_status["phase"] = "error"
+            _analyze_status["message"] = str(exc)
+            _analyze_status["errors"].append(str(exc))
+            _analyze_status["result"] = None
+        return dict(_analyze_status)
+
+
+def _start_analyze_wandb_thread(
+    *,
+    codec: str | None,
+    uids: list[int] | None,
+    failures_only: bool,
+) -> dict[str, Any]:
+    with _analyze_lock:
+        if _analyze_status["running"]:
+            return {"started": False, "status": dict(_analyze_status)}
+    thread = threading.Thread(
+        target=run_analyze_wandb_sync,
+        kwargs={
+            "codec": codec,
+            "uids": uids,
+            "failures_only": failures_only,
+        },
+        daemon=True,
+    )
+    thread.start()
+    with _analyze_lock:
+        return {"started": True, "status": dict(_analyze_status)}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1154,6 +1581,63 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._send_json(result)
             return
+        if parsed.path == "/api/analyze-log":
+            body = self._read_json_body()
+            codec = str(body.get("codec") or "").strip().lower() or None
+            if codec == "all":
+                codec = None
+            failures_only = bool(body.get("failures_only"))
+            uid_raw = body.get("uids") or body.get("uid")
+            if isinstance(uid_raw, list):
+                uid_parts = [str(x) for x in uid_raw]
+            elif uid_raw is None or uid_raw == "":
+                uid_parts = []
+            else:
+                uid_parts = [str(uid_raw)]
+            try:
+                uids = parse_uid_args(uid_parts) if uid_parts else []
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+
+            source = str(body.get("source") or "wandb").strip().lower()
+            paste = body.get("text")
+            if isinstance(paste, str) and paste.strip():
+                source = "paste"
+
+            if source in {"wandb", "fetch", "current"}:
+                result = _start_analyze_wandb_thread(
+                    codec=codec,
+                    uids=uids or None,
+                    failures_only=failures_only,
+                )
+                self._send_json(result)
+                return
+
+            if source == "paste" and isinstance(paste, str) and paste.strip():
+                try:
+                    payload = analyze_validator_log(
+                        text=paste,
+                        codec=codec,
+                        uids=uids or None,
+                        failures_only=failures_only,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json(payload)
+                return
+
+            self._send_json(
+                {"error": "source must be wandb (default) or provide text"},
+                HTTPStatus.BAD_REQUEST,
+            )
+            return
+
+        if parsed.path == "/api/analyze-clear":
+            self._send_json(clear_analyze_status())
+            return
+
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_GET(self, head_only: bool = False) -> None:
@@ -1207,8 +1691,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(compress_status())
             return
 
+        if path == "/api/analyze-status":
+            self._send_json(analyze_status())
+            return
+
         if path == "/api/encode-defaults":
             self._send_json({"defaults": encode_defaults()})
+            return
+
+        if path == "/api/analyze-logs":
+            self._send_json({"logs": discover_log_paths()})
             return
 
         media_match = re.fullmatch(r"/media/(original|compressed)/([^/]+)", path)
