@@ -305,6 +305,39 @@ def assign_fallback_video_labels(scores: list[ScoreRow]) -> None:
         r.video_id = f"video{idx}_bpp{r.ref_bpp:.4f}"
 
 
+def _normalize_video_query(video: Optional[str]) -> str:
+    return str(video or "").strip().lower().lstrip("#")
+
+
+def _score_matches_video(s: ScoreRow, video: Optional[str]) -> bool:
+    """Match a score row to a dashboard video filter."""
+    q = _normalize_video_query(video)
+    if not q:
+        return True
+
+    vid = (s.video_id or "").lower()
+    vurl = (s.video_url or "").lower()
+
+    if vid and q == vid:
+        return True
+
+    m = re.fullmatch(r"video(\d+)(?:_.*)?", q)
+    if m and s.video_idx is not None and int(m.group(1)) == int(s.video_idx):
+        if not vid or vid.startswith(f"video{s.video_idx}"):
+            return True
+
+    if q.isdigit() and s.video_idx is not None and int(q) == int(s.video_idx):
+        return True
+
+    if len(q) >= 4:
+        if vid and q in vid:
+            return True
+        if vurl and q in vurl:
+            return True
+
+    return False
+
+
 def filter_scores(
     scores: Iterable[ScoreRow],
     *,
@@ -313,8 +346,9 @@ def filter_scores(
     uids: Optional[Iterable[int]] = None,
     mode: Optional[str] = None,
     vmaf_threshold: Optional[float] = None,
+    video: Optional[str] = None,
 ) -> list[ScoreRow]:
-    """Filter score rows by codec, mode, VMAF threshold, UID, and failure status."""
+    """Filter score rows by codec, mode, VMAF threshold, UID, video, and failure status."""
     uid_set: Optional[set[int]] = None
     if uids is not None:
         uid_set = {int(u) for u in uids}
@@ -344,6 +378,8 @@ def filter_scores(
             if row_mode != mode_norm:
                 continue
         if thr_val is not None and float(s.vmaf_threshold) != thr_val:
+            continue
+        if not _score_matches_video(s, video):
             continue
         if not include_failures and s.status in ("miner_failure", "missing_video"):
             if s.bitrate_mbps is None and s.vmaf is None:

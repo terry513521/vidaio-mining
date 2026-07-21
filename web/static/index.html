@@ -322,32 +322,17 @@
     .analyze-status.done { color: var(--good); }
     .analyze-status.error { color: var(--warn); }
     .analyze-results { display: grid; gap: 14px; }
-    .chal-block {
+    .analyze-summary {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-bottom: 4px;
+    }
+    .analyze-table-wrap {
+      overflow-x: auto;
       background: var(--panel-2);
       border: 1px solid var(--border);
       border-radius: 10px;
-      padding: 12px;
     }
-    .chal-block h3 { margin: 0 0 10px; font-size: 0.95rem; }
-    .uid-block {
-      border-top: 1px solid var(--border);
-      padding-top: 10px;
-      margin-top: 10px;
-    }
-    .uid-block:first-of-type {
-      border-top: none;
-      padding-top: 0;
-      margin-top: 0;
-    }
-    .uid-head {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: baseline;
-      margin-bottom: 8px;
-      font-size: 0.9rem;
-    }
-    .uid-head strong { color: var(--accent); }
     .score-table {
       width: 100%;
       border-collapse: collapse;
@@ -362,6 +347,24 @@
     .score-table th { color: var(--muted); font-weight: 600; }
     .score-table td.fail { color: var(--warn); }
     .score-table td.ok { color: var(--good); }
+    .score-table td.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.78rem;
+    }
+    .score-table td.filter-link {
+      cursor: pointer;
+      color: var(--accent);
+    }
+    .score-table td.filter-link:hover {
+      text-decoration: underline;
+    }
+    .analyze-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 8px;
+    }
     .analyze-paste {
       width: 100%;
       min-height: 140px;
@@ -479,6 +482,17 @@
         <div class="field">
           <label for="analyze-uids">UID filter</label>
           <input id="analyze-uids" type="text" placeholder="e.g. 66,98,112" />
+        </div>
+        <div class="field">
+          <label for="analyze-video">Video filter</label>
+          <input id="analyze-video" type="text" placeholder="uuid or #3" />
+        </div>
+        <div class="field">
+          <label for="analyze-sort">Sort by</label>
+          <select id="analyze-sort">
+            <option value="final" selected>final score</option>
+            <option value="time">time (newest)</option>
+          </select>
         </div>
         <div class="field">
           <label class="check" style="margin-top:22px;">
@@ -660,7 +674,7 @@
       </div>
     </section>
 
-    <footer>Auto-refresh system stats every 3s · Videos served from local compression folder</footer>
+    <footer>Auto-refresh system stats every 3s · Source videos from workspace/raw videos</footer>
   </div>
 
   <script>
@@ -675,6 +689,14 @@
     let catalog = [];
     let fetchPollTimer = null;
     let compressPollTimer = null;
+    const LOG_DISPLAY_LIMIT = 60;
+
+    function tailLines(text, limit = LOG_DISPLAY_LIMIT) {
+      const lines = String(text || "").split("\n");
+      if (lines.length <= limit) return { text: String(text || ""), total: lines.length, truncated: false };
+      const tail = lines.slice(-limit);
+      return { text: tail.join("\n"), total: lines.length, truncated: true };
+    }
 
     const LIBX265_PRESETS = [
       "ultrafast", "superfast", "veryfast", "faster", "fast",
@@ -899,10 +921,12 @@
       wrap.classList.toggle("hidden", !show);
       if (!show) return;
       const errorLines = data.errors?.length ? `\nErrors:\n${data.errors.join("\n")}` : "";
-      term.textContent = (log || "Waiting for output…") + errorLines;
+      const tailed = tailLines(log || "Waiting for output…");
+      term.textContent = tailed.text + errorLines;
+      const tailNote = tailed.truncated ? ` · last ${LOG_DISPLAY_LIMIT}/${tailed.total} lines` : "";
       meta.textContent = data.running
-        ? "live"
-        : `${data.wandb_run ? data.wandb_run + " · " : ""}${data.done || 0} downloaded · ${data.skipped || 0} local · ${data.failed || 0} failed`;
+        ? `live${tailNote}`
+        : `${data.wandb_run ? data.wandb_run + " · " : ""}${data.done || 0} downloaded · ${data.skipped || 0} local · ${data.failed || 0} failed${tailNote}`;
       if (data.running) {
         term.scrollTop = term.scrollHeight;
       }
@@ -1135,12 +1159,15 @@
       const show = Boolean(data.running || log);
       wrap.classList.toggle("hidden", !show);
       if (!show) return;
-      term.textContent = log || "Waiting for output…";
+      const tailed = tailLines(log || "Waiting for output…");
+      term.textContent = tailed.text;
+      const lineCount = data.log_lines ?? tailed.total;
+      const tailNote = tailed.truncated ? ` · last ${LOG_DISPLAY_LIMIT}/${lineCount} lines` : "";
       meta.textContent = data.running
-        ? `live · ${data.log_lines ?? (log.split("\n").length - 1)} lines`
+        ? `live · ${lineCount} lines${tailNote}`
         : data.phase === "stopped"
-          ? "stopped"
-          : `exit ${data.exit_code ?? "—"}`;
+          ? `stopped${tailNote}`
+          : `exit ${data.exit_code ?? "—"}${tailNote}`;
       if (data.running) {
         term.scrollTop = term.scrollHeight;
       }
@@ -1290,8 +1317,33 @@
         mode: document.getElementById("analyze-mode").value,
         vmaf_threshold: document.getElementById("analyze-vmaf-threshold").value,
         uids: document.getElementById("analyze-uids").value.trim(),
+        video: document.getElementById("analyze-video").value.trim(),
+        sort: document.getElementById("analyze-sort").value,
         failures_only: document.getElementById("analyze-failures").checked,
       };
+    }
+
+    function applyAnalyzeFilter(field, value, extra = {}) {
+      if (field === "uid") {
+        document.getElementById("analyze-uids").value = String(value);
+      } else if (field === "video") {
+        document.getElementById("analyze-video").value = String(value);
+        if (extra.codec) {
+          document.getElementById("analyze-codec").value = String(extra.codec).toLowerCase();
+        }
+      } else if (field === "codec_mode") {
+        const mode = String(value || "").toLowerCase();
+        document.getElementById("analyze-mode").value = mode === "vbr" ? "vbr" : mode === "crf" ? "crf" : "all";
+        if (extra.codec) {
+          document.getElementById("analyze-codec").value = String(extra.codec).toLowerCase();
+        }
+      } else if (field === "vmaf_threshold") {
+        document.getElementById("analyze-vmaf-threshold").value = String(Math.round(Number(value)));
+        if (extra.codec) {
+          document.getElementById("analyze-codec").value = String(extra.codec).toLowerCase();
+        }
+      }
+      runAnalyzeSearch();
     }
 
     async function clearAnalyze() {
@@ -1300,8 +1352,10 @@
         analyzePollTimer = null;
       }
       document.getElementById("analyze-uids").value = "";
+      document.getElementById("analyze-video").value = "";
       document.getElementById("analyze-mode").value = "all";
       document.getElementById("analyze-vmaf-threshold").value = "all";
+      document.getElementById("analyze-sort").value = "final";
       document.getElementById("analyze-failures").checked = false;
       document.getElementById("analyze-results").innerHTML = "";
       document.getElementById("analyze-btn").disabled = false;
@@ -1319,69 +1373,118 @@
       return Number(v).toFixed(digits);
     }
 
+    function fmtTime(ts) {
+      if (!ts) return "—";
+      try {
+        const d = new Date(ts.replace(" ", "T"));
+        if (Number.isNaN(d.getTime())) return ts;
+        return d.toLocaleString(undefined, {
+          month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit",
+        });
+      } catch (_) {
+        return ts;
+      }
+    }
+
+    function videoLabel(row) {
+      if (row.video_id) return row.video_id;
+      if (row.video_idx != null) return `#${row.video_idx}`;
+      return "—";
+    }
+
+    function flattenAnalyzeEntries(data) {
+      if (Array.isArray(data.entries) && data.entries.length) {
+        return [...data.entries];
+      }
+      const out = [];
+      for (const chal of data.challenges || []) {
+        for (const uidBlock of chal.uids || []) {
+          for (const row of uidBlock.rows || []) {
+            out.push({
+              ...row,
+              codec: row.codec || chal.codec,
+              codec_mode: (row.codec_mode || row.mode || chal.mode || "").toLowerCase(),
+              vmaf_threshold: row.vmaf_threshold ?? chal.vmaf_threshold,
+            });
+          }
+        }
+      }
+      const sortKey = data.sort || document.getElementById("analyze-sort").value || "final";
+      if (sortKey === "time") {
+        out.sort((a, b) => String(b.ts || "").localeCompare(String(a.ts || "")));
+      } else {
+        out.sort((a, b) => Number(b.final || 0) - Number(a.final || 0));
+      }
+      return out;
+    }
+
     function renderAnalyzeResults(data) {
       const root = document.getElementById("analyze-results");
       root.innerHTML = "";
-      const challenges = [...(data.challenges || [])].sort((a, b) => {
-        const aTop = Number(a.top_mean_final ?? (a.uids && a.uids[0] && a.uids[0].mean_final) ?? 0);
-        const bTop = Number(b.top_mean_final ?? (b.uids && b.uids[0] && b.uids[0].mean_final) ?? 0);
-        return bTop - aTop;
-      });
-      if (!challenges.length) {
+      const entries = flattenAnalyzeEntries(data);
+      if (!entries.length) {
         root.innerHTML = '<div class="empty">No matching score lines</div>';
         return;
       }
-      for (const chal of challenges) {
-        const block = document.createElement("div");
-        block.className = "chal-block";
-        const uids = [...(chal.uids || [])].sort(
-          (a, b) => Number(b.mean_final || 0) - Number(a.mean_final || 0)
-        );
-        block.innerHTML = `<h3>${chal.codec} · ${chal.mode} · thr ${chal.vmaf_threshold} · ${uids.length} UID(s) · sorted by mean_final</h3>`;
-        for (const uid of uids) {
-          const uidEl = document.createElement("div");
-          uidEl.className = "uid-block";
-          const head = document.createElement("div");
-          head.className = "uid-head";
-          head.innerHTML = `<strong>UID ${uid.uid}</strong>
-            <span class="sub">videos=${uid.videos}</span>
-            <span class="sub">mean_final=${fmtNum(uid.mean_final)}</span>
-            <span class="sub">max=${fmtNum(uid.max_final)}</span>
-            <span class="sub">VMAF_NEG=${fmtNum(uid.mean_vmaf_neg, 2)}</span>
-            <span class="sub">rate=${fmtNum(uid.mean_rate)}</span>
-            <span class="sub">ok=${uid.successes}/${uid.videos}</span>`;
-          uidEl.appendChild(head);
-          const table = document.createElement("table");
-          table.className = "score-table";
-          table.innerHTML = `<thead><tr>
-            <th>#</th><th>video</th><th>final</th><th>VMAF NEG</th><th>rate</th><th>ratio</th>
-            <th>bitrate</th><th>bpp</th><th>status</th>
-          </tr></thead>`;
-          const tbody = document.createElement("tbody");
-          const rows = [...(uid.rows || [])].sort(
-            (a, b) => Number(b.final || 0) - Number(a.final || 0)
-          );
-          rows.forEach((row, i) => {
-            const tr = document.createElement("tr");
-            const ok = row.success;
-            const vid = row.video_id || (row.video_idx != null ? `#${row.video_idx}` : "—");
-            tr.innerHTML = `<td>${i + 1}</td>
-              <td title="${row.video_url || ""}">${vid}</td>
-              <td>${fmtNum(row.final)}</td>
-              <td>${fmtNum(row.vmaf_neg, 2)}</td>
-              <td>${fmtNum(row.compression_rate)}</td>
-              <td>${row.compression_ratio != null ? Number(row.compression_ratio).toFixed(2) + "x" : "—"}</td>
-              <td>${row.bitrate_mbps != null ? Number(row.bitrate_mbps).toFixed(3) + "M" : "—"}</td>
-              <td>${row.dist_bpp != null ? Number(row.dist_bpp).toFixed(4) : (row.ref_bpp != null ? Number(row.ref_bpp).toFixed(4) : "—")}</td>
-              <td class="${ok ? "ok" : "fail"}">${row.status || (ok ? "ok" : "fail")}</td>`;
-            tbody.appendChild(tr);
-          });
-          table.appendChild(tbody);
-          uidEl.appendChild(table);
-          block.appendChild(uidEl);
-        }
-        root.appendChild(block);
+      const totalEntries = entries.length;
+      const visibleEntries = entries.slice(0, LOG_DISPLAY_LIMIT);
+
+      const summary = document.createElement("div");
+      summary.className = "analyze-summary";
+      const filters = [];
+      if (data.codec_filter) filters.push(`codec=${data.codec_filter}`);
+      if (data.mode_filter) filters.push(`codec_mode=${data.mode_filter}`);
+      if (data.vmaf_threshold_filter != null) filters.push(`vmaf_threshold=${data.vmaf_threshold_filter}`);
+      if (data.uid_filter?.length) filters.push(`uid=${data.uid_filter.join(",")}`);
+      if (data.video_filter) filters.push(`video=${data.video_filter}`);
+      const sortLabel = (data.sort || "final") === "time" ? "time (newest)" : "final score";
+      const countLabel = totalEntries > LOG_DISPLAY_LIMIT
+        ? `Showing ${visibleEntries.length} of ${totalEntries} result(s)`
+        : `Showing ${totalEntries} result(s)`;
+      summary.textContent = countLabel
+        + (filters.length ? ` · ${filters.join(" · ")}` : "")
+        + ` · sorted by ${sortLabel}`
+        + " · click uid / video / codec_mode / vmaf_threshold to filter";
+      root.appendChild(summary);
+
+      const wrap = document.createElement("div");
+      wrap.className = "analyze-table-wrap";
+      const table = document.createElement("table");
+      table.className = "score-table";
+      table.innerHTML = `<thead><tr>
+        <th>time</th><th>uid</th><th>video</th><th>codec</th><th>codec_mode</th>
+        <th>vmaf_threshold</th><th>final</th><th>VMAF NEG</th><th>rate</th><th>ratio</th><th>status</th>
+      </tr></thead>`;
+      const tbody = document.createElement("tbody");
+      for (const row of visibleEntries) {
+        const tr = document.createElement("tr");
+        const ok = row.success;
+        const vid = videoLabel(row);
+        const codecMode = (row.codec_mode || row.mode || row.challenge_mode || "—").toString().toLowerCase();
+        const rowCodec = (row.codec || row.challenge_codec || "").toString().toLowerCase();
+        tr.innerHTML = `<td class="mono">${fmtTime(row.ts)}</td>
+          <td class="filter-link" data-filter="uid" data-value="${row.uid ?? ""}">${row.uid ?? "—"}</td>
+          <td class="filter-link" data-filter="video" data-value="${vid}" data-codec="${rowCodec}" title="${row.video_url || ""}">${vid}</td>
+          <td>${row.codec || row.challenge_codec || "—"}</td>
+          <td class="filter-link" data-filter="codec_mode" data-value="${codecMode}" data-codec="${rowCodec}">${codecMode}</td>
+          <td class="filter-link" data-filter="vmaf_threshold" data-value="${row.vmaf_threshold ?? ""}" data-codec="${rowCodec}">${row.vmaf_threshold != null ? Number(row.vmaf_threshold) : "—"}</td>
+          <td>${fmtNum(row.final)}</td>
+          <td>${fmtNum(row.vmaf_neg, 2)}</td>
+          <td>${fmtNum(row.compression_rate)}</td>
+          <td>${row.compression_ratio != null ? Number(row.compression_ratio).toFixed(2) + "x" : "—"}</td>
+          <td class="${ok ? "ok" : "fail"}">${row.status || (ok ? "ok" : "fail")}</td>`;
+        tbody.appendChild(tr);
       }
+      tbody.querySelectorAll(".filter-link").forEach((cell) => {
+        cell.addEventListener("click", () => {
+          applyAnalyzeFilter(cell.dataset.filter, cell.dataset.value, {
+            codec: cell.dataset.codec || "",
+          });
+        });
+      });
+      table.appendChild(tbody);
+      wrap.appendChild(table);
+      root.appendChild(wrap);
     }
 
     async function pollAnalyzeStatus() {
@@ -1417,6 +1520,18 @@
         const res = await fetch("/api/analyze-status");
         const data = await res.json();
         if (!data.running && !data.result && data.phase === "idle") return;
+        const params = data.params || {};
+        if (params.codec) document.getElementById("analyze-codec").value = params.codec;
+        if (params.mode) document.getElementById("analyze-mode").value = String(params.mode).toLowerCase();
+        if (params.vmaf_threshold != null) {
+          document.getElementById("analyze-vmaf-threshold").value = String(params.vmaf_threshold);
+        }
+        if (params.uids?.length) {
+          document.getElementById("analyze-uids").value = params.uids.join(",");
+        }
+        if (params.video) document.getElementById("analyze-video").value = params.video;
+        if (params.sort) document.getElementById("analyze-sort").value = params.sort;
+        if (params.failures_only) document.getElementById("analyze-failures").checked = true;
         const cls = data.running
           ? "running"
           : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
@@ -1506,6 +1621,9 @@
     document.getElementById("analyze-btn").addEventListener("click", runAnalyze);
     document.getElementById("analyze-search").addEventListener("click", runAnalyzeSearch);
     document.getElementById("analyze-clear").addEventListener("click", clearAnalyze);
+    document.getElementById("analyze-sort").addEventListener("change", () => {
+      runAnalyzeSearch();
+    });
     toggleTargetBitrateField();
     loadEncodeDefaults();
     bindSync();

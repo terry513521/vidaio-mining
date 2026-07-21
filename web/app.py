@@ -27,6 +27,8 @@ import psutil
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT.parent
 STATIC = Path(__file__).resolve().parent / "static"
+RAW_VIDEO_DIR = Path(os.environ.get("RAW_VIDEO_DIR", WORKSPACE / "raw videos"))
+# Legacy fallbacks (older downloads / numbered test clips).
 COMPRESSION_DIR = ROOT / "s3_videos" / "compression"
 VIDEO_DIR = WORKSPACE / "video"
 REQUEST_JSON = ROOT / "request.json"
@@ -848,7 +850,26 @@ def build_catalog() -> list[dict[str, Any]]:
             )
         )
 
-    # Also include WandB challenge downloads if present.
+    # WandB / raw challenge downloads under workspace/raw videos.
+    if RAW_VIDEO_DIR.is_dir():
+        for original in sorted(RAW_VIDEO_DIR.glob("*.mp4")):
+            if original.name in seen_names:
+                continue
+            seen_names.add(original.name)
+            job = jobs_by_input.get(original.name, {})
+            job_id = str(job.get("id") or "")
+            batch = batch_by_job.get(job_id) if job_id else None
+            entries.append(
+                _catalog_entry(
+                    name=original.name,
+                    original=original,
+                    job=job or None,
+                    batch=batch,
+                    shared_request=shared_request,
+                )
+            )
+
+    # Legacy s3_videos/compression mirror (if still present).
     if COMPRESSION_DIR.is_dir():
         for original in sorted(COMPRESSION_DIR.glob("*.mp4")):
             if original.name in seen_names:
@@ -970,22 +991,36 @@ def system_stats() -> dict[str, Any]:
     }
 
 
-def _find_original(name: str) -> Path | None:
+def _find_raw_video(name: str) -> Path | None:
+    """Resolve a source video by filename (raw videos dir first, then legacy paths)."""
     safe = Path(unquote(name)).name
-    path = COMPRESSION_DIR / safe
-    if path.is_file():
-        return path
+    for base in (RAW_VIDEO_DIR, COMPRESSION_DIR, VIDEO_DIR):
+        path = base / safe
+        if path.is_file():
+            return path
     jobs = _load_jobs_by_input()
     job = jobs.get(safe)
     if job:
         found = _original_path_for_job(job)
         if found is not None:
             return found
-    # Direct lookup under workspace/video (fleet inputs).
-    direct = VIDEO_DIR / safe
-    if direct.is_file():
-        return direct
     return None
+
+
+def _raw_video_input_path(name: str) -> str:
+    """Fleet request path relative to vidaio-mining root."""
+    safe = Path(name).name
+    found = _find_raw_video(safe)
+    if found is None:
+        raise FileNotFoundError(f"video not found: {safe}")
+    try:
+        return str(found.relative_to(ROOT))
+    except ValueError:
+        return str(found)
+
+
+def _find_original(name: str) -> Path | None:
+    return _find_raw_video(name)
 
 
 def _find_compressed(name: str) -> Path | None:
@@ -1196,10 +1231,12 @@ def fetch_compression_challenges_sync() -> dict[str, Any]:
         urls = _extract_compression_urls(log_text)
         if not urls:
             raise RuntimeError("No compression challenge URLs found in WandB output.log")
-        COMPRESSION_DIR.mkdir(parents=True, exist_ok=True)
+        RAW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
         url_list_path = ROOT / "s3_videos" / "compression_urls.txt"
+        url_list_path.parent.mkdir(parents=True, exist_ok=True)
         url_list_path.write_text("\n".join(urls) + "\n")
         _append_fetch_log(f"Extracted {len(urls)} compression URLs -> {url_list_path}")
+        _append_fetch_log(f"Download target: {RAW_VIDEO_DIR}")
 
         with _fetch_lock:
             _fetch_status["phase"] = "downloading"
@@ -1208,7 +1245,7 @@ def fetch_compression_challenges_sync() -> dict[str, Any]:
 
         for index, url in enumerate(urls, start=1):
             name = Path(urlparse(url).path).name
-            dest = COMPRESSION_DIR / name
+            dest = RAW_VIDEO_DIR / name
             with _fetch_lock:
                 _fetch_status["current"] = name
                 _fetch_status["message"] = f"[{index}/{len(urls)}] {name}"
@@ -1284,14 +1321,12 @@ def _build_jobs_from_videos(video_names: list[str]) -> list[dict[str, str]]:
     jobs: list[dict[str, str]] = []
     for index, name in enumerate(video_names, start=1):
         safe_name = Path(name).name
-        src = COMPRESSION_DIR / safe_name
-        if not src.is_file():
-            raise FileNotFoundError(f"video not found: {safe_name}")
+        input_path = _raw_video_input_path(safe_name)
         job_id = f"v{index}"
         jobs.append(
             {
                 "id": job_id,
-                "input_path": f"./s3_videos/compression/{safe_name}",
+                "input_path": input_path,
                 "output_path": f"./output/fleet/{job_id}.mp4",
             }
         )
@@ -1580,7 +1615,9 @@ def analyze_validator_log(
     mode: str | None = None,
     vmaf_threshold: float | None = None,
     uids: list[int] | None = None,
+    video: str | None = None,
     failures_only: bool = False,
+    sort: str = "final",
 ) -> dict[str, Any]:
     if scores is not None:
         source = "cache"
@@ -1604,6 +1641,7 @@ def analyze_validator_log(
         vmaf_threshold=vmaf_threshold,
         include_failures=failures_only,
         uids=uids or None,
+        video=video or None,
     )
 
     # Group: challenge -> uid -> videos (uids ranked by mean final desc)
@@ -1658,6 +1696,29 @@ def analyze_validator_log(
         )
     )
 
+    entries: list[dict[str, Any]] = []
+    for row in rows:
+        d = asdict(row)
+        d["codec_mode"] = str(row.mode or "").lower() or None
+        entries.append(d)
+    sort_key = str(sort or "final").strip().lower()
+    if sort_key == "time":
+        entries.sort(
+            key=lambda r: (
+                str(r.get("ts") or ""),
+                -float(r.get("final") or 0.0),
+            ),
+            reverse=True,
+        )
+    else:
+        entries.sort(
+            key=lambda r: (
+                -float(r.get("final") or 0.0),
+                str(r.get("ts") or ""),
+                int(r.get("uid") or 0),
+            )
+        )
+
     return {
         "source": source,
         "path": source_path,
@@ -1667,8 +1728,11 @@ def analyze_validator_log(
         "mode_filter": mode or None,
         "vmaf_threshold_filter": vmaf_threshold,
         "uid_filter": uids or None,
+        "video_filter": video or None,
+        "sort": sort_key if sort_key in {"final", "time"} else "final",
         "failures_only": failures_only,
         "challenges": challenges,
+        "entries": entries,
     }
 
 
@@ -1692,11 +1756,22 @@ def _parse_analyze_filters(body: dict[str, Any]) -> dict[str, Any]:
     else:
         uid_parts = [str(uid_raw)]
     uids = parse_uid_args(uid_parts) if uid_parts else []
+    video_raw = body.get("video")
+    if video_raw in (None, ""):
+        video_raw = body.get("videos")
+    if isinstance(video_raw, list):
+        video_raw = video_raw[0] if video_raw else None
+    video = str(video_raw or "").strip() or None
+    sort = str(body.get("sort") or "final").strip().lower()
+    if sort not in {"final", "time"}:
+        sort = "final"
     return {
         "codec": codec,
         "mode": mode,
         "vmaf_threshold": vmaf_threshold,
         "uids": uids or None,
+        "video": video,
+        "sort": sort,
         "failures_only": failures_only,
     }
 
@@ -1742,12 +1817,33 @@ def _ensure_score_cache() -> tuple[list[Any], str | None]:
     raise RuntimeError("No cached log yet — click Analyze from WandB first")
 
 
+def _analyze_status_message(
+    result: dict[str, Any],
+    *,
+    wandb_run: str | None = None,
+    video: str | None = None,
+    codec: str | None = None,
+) -> str:
+    parts = [f"{result['filtered']} / {result['total_scores']} scores"]
+    if video:
+        parts.append(f"video={video}")
+    if codec:
+        parts.append(f"codec={codec}")
+    if wandb_run:
+        parts.append(f"from {wandb_run}")
+    elif result.get("source") == "cache":
+        parts.append("(cached log)")
+    return " · ".join(parts)
+
+
 def search_analyze_cache(
     *,
     codec: str | None,
     mode: str | None,
     vmaf_threshold: float | None,
     uids: list[int] | None,
+    video: str | None,
+    sort: str,
     failures_only: bool,
 ) -> dict[str, Any]:
     """Re-filter the cached WandB log without downloading again."""
@@ -1758,6 +1854,8 @@ def search_analyze_cache(
         mode=mode,
         vmaf_threshold=vmaf_threshold,
         uids=uids,
+        video=video,
+        sort=sort,
         failures_only=failures_only,
     )
     if wandb_run:
@@ -1771,11 +1869,15 @@ def search_analyze_cache(
             "mode": mode,
             "vmaf_threshold": vmaf_threshold,
             "uids": uids or [],
+            "video": video,
+            "sort": sort,
             "failures_only": failures_only,
         }
-        _analyze_status["message"] = (
-            f"{result['filtered']} / {result['total_scores']} scores"
-            + (f" from {wandb_run}" if wandb_run else " (cached log)")
+        _analyze_status["message"] = _analyze_status_message(
+            result,
+            wandb_run=wandb_run,
+            video=video,
+            codec=codec,
         )
         _analyze_status["has_cache"] = True
         return dict(_analyze_status)
@@ -1787,6 +1889,8 @@ def run_analyze_wandb_sync(
     mode: str | None,
     vmaf_threshold: float | None,
     uids: list[int] | None,
+    video: str | None,
+    sort: str,
     failures_only: bool,
 ) -> dict[str, Any]:
     global _analyze_status, _analyze_score_cache
@@ -1804,6 +1908,8 @@ def run_analyze_wandb_sync(
                 "mode": mode,
                 "vmaf_threshold": vmaf_threshold,
                 "uids": uids or [],
+                "video": video,
+                "sort": sort,
                 "failures_only": failures_only,
             },
             "result": None,
@@ -1831,6 +1937,8 @@ def run_analyze_wandb_sync(
             mode=mode,
             vmaf_threshold=vmaf_threshold,
             uids=uids,
+            video=video,
+            sort=sort,
             failures_only=failures_only,
         )
         result["wandb_run"] = run_name
@@ -1841,9 +1949,11 @@ def run_analyze_wandb_sync(
             _analyze_status["running"] = False
             _analyze_status["phase"] = "done"
             _analyze_status["result"] = result
-            _analyze_status["message"] = (
-                f"{result['filtered']} / {result['total_scores']} scores "
-                f"from {run_name}"
+            _analyze_status["message"] = _analyze_status_message(
+                result,
+                wandb_run=run_name,
+                video=video,
+                codec=codec,
             )
             _analyze_status["has_cache"] = True
         return dict(_analyze_status)
@@ -1863,6 +1973,8 @@ def _start_analyze_wandb_thread(
     mode: str | None,
     vmaf_threshold: float | None,
     uids: list[int] | None,
+    video: str | None,
+    sort: str,
     failures_only: bool,
 ) -> dict[str, Any]:
     with _analyze_lock:
@@ -1875,6 +1987,8 @@ def _start_analyze_wandb_thread(
             "mode": mode,
             "vmaf_threshold": vmaf_threshold,
             "uids": uids,
+            "video": video,
+            "sort": sort,
             "failures_only": failures_only,
         },
         daemon=True,
@@ -2085,6 +2199,8 @@ class Handler(BaseHTTPRequestHandler):
                     mode=filters["mode"],
                     vmaf_threshold=filters["vmaf_threshold"],
                     uids=filters["uids"],
+                    video=filters["video"],
+                    sort=filters["sort"],
                     failures_only=filters["failures_only"],
                 )
                 self._send_json(result)
@@ -2098,6 +2214,8 @@ class Handler(BaseHTTPRequestHandler):
                         mode=filters["mode"],
                         vmaf_threshold=filters["vmaf_threshold"],
                         uids=filters["uids"],
+                        video=filters["video"],
+                        sort=filters["sort"],
                         failures_only=filters["failures_only"],
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -2125,6 +2243,8 @@ class Handler(BaseHTTPRequestHandler):
                     mode=filters["mode"],
                     vmaf_threshold=filters["vmaf_threshold"],
                     uids=filters["uids"],
+                    video=filters["video"],
+                    sort=filters["sort"],
                     failures_only=filters["failures_only"],
                 )
             except Exception as exc:  # noqa: BLE001
@@ -2153,9 +2273,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 return
-            self._send_bytes(body, "text/html; charset=utf-8")
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         if path == "/api/videos":
@@ -2229,7 +2355,8 @@ def main() -> None:
     STATIC.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Vidaio dashboard: http://{HOST}:{PORT}")
-    print(f"Compression dir: {COMPRESSION_DIR}")
+    print(f"Raw video dir: {RAW_VIDEO_DIR}")
+    print(f"Legacy compression dir: {COMPRESSION_DIR}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

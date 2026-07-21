@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--dir",
-        default="s3_videos/compression",
+        default="../raw videos",
         help="Directory of .mp4 files (recursive)",
     )
     parser.add_argument("--limit", type=int, default=0, help="Max videos (0=all)")
