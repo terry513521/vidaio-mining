@@ -189,6 +189,19 @@ class CompressionRequest:
     crf_mode_max_compression_rate: Optional[float] = None
     crf_mode_lookahead_default: int = 50
     crf_mode_lookahead_sweep: tuple[int, ...] = (40, 60)
+    # VBR mode: proxy (2s/scene) preprocess arms + aq→rd→bframes→lookahead ladder.
+    # When True (default on ABR), replaces legacy sequential param_tune for VBR.
+    vbr_mode_tune: bool = True
+    vbr_mode_aq_min: float = 0.2
+    vbr_mode_aq_max: float = 2.6
+    vbr_mode_aq_step: float = 0.2
+    vbr_mode_rd_sweep: tuple[int, ...] = (4, 5, 6)
+    vbr_mode_bframes_sweep: tuple[int, ...] = (6, 8, 12)
+    vbr_mode_lookahead_sweep: tuple[int, ...] = (40, 50, 60)
+    vbr_mode_proxy_seconds_per_scene: float = 2.0
+    # Cap parallel fleet jobs during VBR-mode proxy search (OOM guard).
+    # Each job runs libx265 + VMAF; 5-wide waves easily OOM on ~50GB hosts.
+    vbr_mode_max_parallel: int = 2
     # Legacy proxy search (mashup seconds-per-segment). Used when scene_crf_search=false.
     use_proxy: bool = True
     proxy_seconds_per_segment: float = 2.5
@@ -580,6 +593,32 @@ class CompressionRequest:
             self.crf_mode_lookahead_sweep = tuple(int(x) for x in self.crf_mode_lookahead_sweep)
         else:
             self.crf_mode_lookahead_sweep = tuple(int(x) for x in self.crf_mode_lookahead_sweep)
+        if float(self.vbr_mode_aq_step) <= 0:
+            raise ValueError("vbr_mode_aq_step must be > 0")
+        if float(self.vbr_mode_aq_min) > float(self.vbr_mode_aq_max):
+            raise ValueError("vbr_mode_aq_min must be <= vbr_mode_aq_max")
+        if float(self.vbr_mode_proxy_seconds_per_scene) <= 0:
+            raise ValueError("vbr_mode_proxy_seconds_per_scene must be > 0")
+        if int(self.vbr_mode_max_parallel) < 1:
+            raise ValueError("vbr_mode_max_parallel must be >= 1")
+        if isinstance(self.vbr_mode_rd_sweep, list):
+            self.vbr_mode_rd_sweep = tuple(int(x) for x in self.vbr_mode_rd_sweep)
+        else:
+            self.vbr_mode_rd_sweep = tuple(int(x) for x in self.vbr_mode_rd_sweep)
+        if isinstance(self.vbr_mode_bframes_sweep, list):
+            self.vbr_mode_bframes_sweep = tuple(int(x) for x in self.vbr_mode_bframes_sweep)
+        else:
+            self.vbr_mode_bframes_sweep = tuple(int(x) for x in self.vbr_mode_bframes_sweep)
+        if isinstance(self.vbr_mode_lookahead_sweep, list):
+            self.vbr_mode_lookahead_sweep = tuple(int(x) for x in self.vbr_mode_lookahead_sweep)
+        else:
+            self.vbr_mode_lookahead_sweep = tuple(int(x) for x in self.vbr_mode_lookahead_sweep)
+        if not self.vbr_mode_rd_sweep:
+            raise ValueError("vbr_mode_rd_sweep must be non-empty")
+        if not self.vbr_mode_bframes_sweep:
+            raise ValueError("vbr_mode_bframes_sweep must be non-empty")
+        if not self.vbr_mode_lookahead_sweep:
+            raise ValueError("vbr_mode_lookahead_sweep must be non-empty")
         if float(self.crf_search_sample_every_sec) <= 0:
             raise ValueError("crf_search_sample_every_sec must be > 0")
         if int(self.crf_search_min_samples) < 1:

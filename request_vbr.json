@@ -1,0 +1,414 @@
+{
+  "skip_transfer": true,
+  "jobs": [
+    {
+      "id": "v1",
+      "input_path": "/root/workspace/video/1.mp4",
+      "output_path": "./output/fleet/v1.mp4"
+    },
+    {
+      "id": "v2",
+      "input_path": "/root/workspace/video/2.mp4",
+      "output_path": "./output/fleet/v2.mp4"
+    },
+    {
+      "id": "v3",
+      "input_path": "/root/workspace/video/3.mp4",
+      "output_path": "./output/fleet/v3.mp4"
+    },
+    {
+      "id": "v4",
+      "input_path": "/root/workspace/video/4.mp4",
+      "output_path": "./output/fleet/v4.mp4"
+    },
+    {
+      "id": "v5",
+      "input_path": "/root/workspace/video/5.mp4",
+      "output_path": "./output/fleet/v5.mp4"
+    },
+    {
+      "id": "v6",
+      "input_path": "/root/workspace/video/6.mp4",
+      "output_path": "./output/fleet/v6.mp4"
+    },
+    {
+      "id": "v7",
+      "input_path": "/root/workspace/video/7.mp4",
+      "output_path": "./output/fleet/v7.mp4"
+    },
+    {
+      "id": "v8",
+      "input_path": "/root/workspace/video/8.mp4",
+      "output_path": "./output/fleet/v8.mp4"
+    },
+    {
+      "id": "v9",
+      "input_path": "/root/workspace/video/9.mp4",
+      "output_path": "./output/fleet/v9.mp4"
+    },
+    {
+      "id": "v10",
+      "input_path": "/root/workspace/video/10.mp4",
+      "output_path": "./output/fleet/v10.mp4"
+    },
+    {
+      "id": "v11",
+      "input_path": "/root/workspace/video/11.mp4",
+      "output_path": "./output/fleet/v11.mp4"
+    },
+    {
+      "id": "v12",
+      "input_path": "/root/workspace/video/12.mp4",
+      "output_path": "./output/fleet/v12.mp4"
+    },
+    {
+      "id": "v13",
+      "input_path": "/root/workspace/video/13.mp4",
+      "output_path": "./output/fleet/v13.mp4"
+    },
+    {
+      "id": "v14",
+      "input_path": "/root/workspace/video/14.mp4",
+      "output_path": "./output/fleet/v14.mp4"
+    },
+    {
+      "id": "v15",
+      "input_path": "/root/workspace/video/15.mp4",
+      "output_path": "./output/fleet/v15.mp4"
+    },
+    {
+      "id": "v16",
+      "input_path": "/root/workspace/video/16.mp4",
+      "output_path": "./output/fleet/v16.mp4"
+    },
+    {
+      "id": "v17",
+      "input_path": "/root/workspace/video/17.mp4",
+      "output_path": "./output/fleet/v17.mp4"
+    },
+    {
+      "id": "v18",
+      "input_path": "/root/workspace/video/18.mp4",
+      "output_path": "./output/fleet/v18.mp4"
+    },
+    {
+      "id": "v19",
+      "input_path": "/root/workspace/video/19.mp4",
+      "output_path": "./output/fleet/v19.mp4"
+    },
+    {
+      "id": "v20",
+      "input_path": "/root/workspace/video/20.mp4",
+      "output_path": "./output/fleet/v20.mp4"
+    },
+    {
+      "id": "v21",
+      "input_path": "/root/workspace/video/21.mp4",
+      "output_path": "./output/fleet/v21.mp4"
+    },
+    {
+      "id": "v22",
+      "input_path": "/root/workspace/video/22.mp4",
+      "output_path": "./output/fleet/v22.mp4"
+    },
+    {
+      "id": "v23",
+      "input_path": "/root/workspace/video/23.mp4",
+      "output_path": "./output/fleet/v23.mp4"
+    },
+    {
+      "id": "v24",
+      "input_path": "/root/workspace/video/24.mp4",
+      "output_path": "./output/fleet/v24.mp4"
+    },
+    {
+      "id": "v25",
+      "input_path": "/root/workspace/video/25.mp4",
+      "output_path": "./output/fleet/v25.mp4"
+    },
+    {
+      "id": "v26",
+      "input_path": "/root/workspace/video/26.mp4",
+      "output_path": "./output/fleet/v26.mp4"
+    },
+    {
+      "id": "v27",
+      "input_path": "/root/workspace/video/27.mp4",
+      "output_path": "./output/fleet/v27.mp4"
+    },
+    {
+      "id": "v28",
+      "input_path": "/root/workspace/video/28.mp4",
+      "output_path": "./output/fleet/v28.mp4"
+    },
+    {
+      "id": "v29",
+      "input_path": "/root/workspace/video/29.mp4",
+      "output_path": "./output/fleet/v29.mp4"
+    },
+    {
+      "id": "v30",
+      "input_path": "/root/workspace/video/30.mp4",
+      "output_path": "./output/fleet/v30.mp4"
+    },
+    {
+      "id": "v31",
+      "input_path": "/root/workspace/video/31.mp4",
+      "output_path": "./output/fleet/v31.mp4"
+    },
+    {
+      "id": "v32",
+      "input_path": "/root/workspace/video/32.mp4",
+      "output_path": "./output/fleet/v32.mp4"
+    },
+    {
+      "id": "v33",
+      "input_path": "/root/workspace/video/33.mp4",
+      "output_path": "./output/fleet/v33.mp4"
+    },
+    {
+      "id": "v34",
+      "input_path": "/root/workspace/video/34.mp4",
+      "output_path": "./output/fleet/v34.mp4"
+    },
+    {
+      "id": "v35",
+      "input_path": "/root/workspace/video/35.mp4",
+      "output_path": "./output/fleet/v35.mp4"
+    },
+    {
+      "id": "v36",
+      "input_path": "/root/workspace/video/36.mp4",
+      "output_path": "./output/fleet/v36.mp4"
+    },
+    {
+      "id": "v37",
+      "input_path": "/root/workspace/video/37.mp4",
+      "output_path": "./output/fleet/v37.mp4"
+    },
+    {
+      "id": "v38",
+      "input_path": "/root/workspace/video/38.mp4",
+      "output_path": "./output/fleet/v38.mp4"
+    },
+    {
+      "id": "v39",
+      "input_path": "/root/workspace/video/39.mp4",
+      "output_path": "./output/fleet/v39.mp4"
+    },
+    {
+      "id": "v40",
+      "input_path": "/root/workspace/video/40.mp4",
+      "output_path": "./output/fleet/v40.mp4"
+    },
+    {
+      "id": "v41",
+      "input_path": "/root/workspace/video/41.mp4",
+      "output_path": "./output/fleet/v41.mp4"
+    },
+    {
+      "id": "v42",
+      "input_path": "/root/workspace/video/42.mp4",
+      "output_path": "./output/fleet/v42.mp4"
+    },
+    {
+      "id": "v43",
+      "input_path": "/root/workspace/video/43.mp4",
+      "output_path": "./output/fleet/v43.mp4"
+    },
+    {
+      "id": "v44",
+      "input_path": "/root/workspace/video/44.mp4",
+      "output_path": "./output/fleet/v44.mp4"
+    },
+    {
+      "id": "v45",
+      "input_path": "/root/workspace/video/45.mp4",
+      "output_path": "./output/fleet/v45.mp4"
+    },
+    {
+      "id": "v46",
+      "input_path": "/root/workspace/video/46.mp4",
+      "output_path": "./output/fleet/v46.mp4"
+    },
+    {
+      "id": "v47",
+      "input_path": "/root/workspace/video/47.mp4",
+      "output_path": "./output/fleet/v47.mp4"
+    },
+    {
+      "id": "v48",
+      "input_path": "/root/workspace/video/48.mp4",
+      "output_path": "./output/fleet/v48.mp4"
+    },
+    {
+      "id": "v49",
+      "input_path": "/root/workspace/video/49.mp4",
+      "output_path": "./output/fleet/v49.mp4"
+    },
+    {
+      "id": "v50",
+      "input_path": "/root/workspace/video/50.mp4",
+      "output_path": "./output/fleet/v50.mp4"
+    },
+    {
+      "id": "v51",
+      "input_path": "/root/workspace/video/51.mp4",
+      "output_path": "./output/fleet/v51.mp4"
+    },
+    {
+      "id": "v52",
+      "input_path": "/root/workspace/video/52.mp4",
+      "output_path": "./output/fleet/v52.mp4"
+    },
+    {
+      "id": "v53",
+      "input_path": "/root/workspace/video/53.mp4",
+      "output_path": "./output/fleet/v53.mp4"
+    },
+    {
+      "id": "v54",
+      "input_path": "/root/workspace/video/54.mp4",
+      "output_path": "./output/fleet/v54.mp4"
+    },
+    {
+      "id": "v55",
+      "input_path": "/root/workspace/video/55.mp4",
+      "output_path": "./output/fleet/v55.mp4"
+    },
+    {
+      "id": "v56",
+      "input_path": "/root/workspace/video/56.mp4",
+      "output_path": "./output/fleet/v56.mp4"
+    },
+    {
+      "id": "v57",
+      "input_path": "/root/workspace/video/57.mp4",
+      "output_path": "./output/fleet/v57.mp4"
+    },
+    {
+      "id": "v58",
+      "input_path": "/root/workspace/video/58.mp4",
+      "output_path": "./output/fleet/v58.mp4"
+    },
+    {
+      "id": "v59",
+      "input_path": "/root/workspace/video/59.mp4",
+      "output_path": "./output/fleet/v59.mp4"
+    },
+    {
+      "id": "v60",
+      "input_path": "/root/workspace/video/60.mp4",
+      "output_path": "./output/fleet/v60.mp4"
+    },
+    {
+      "id": "v61",
+      "input_path": "/root/workspace/video/61.mp4",
+      "output_path": "./output/fleet/v61.mp4"
+    },
+    {
+      "id": "v62",
+      "input_path": "/root/workspace/video/62.mp4",
+      "output_path": "./output/fleet/v62.mp4"
+    },
+    {
+      "id": "v63",
+      "input_path": "/root/workspace/video/63.mp4",
+      "output_path": "./output/fleet/v63.mp4"
+    },
+    {
+      "id": "v64",
+      "input_path": "/root/workspace/video/64.mp4",
+      "output_path": "./output/fleet/v64.mp4"
+    },
+    {
+      "id": "v65",
+      "input_path": "/root/workspace/video/65.mp4",
+      "output_path": "./output/fleet/v65.mp4"
+    },
+    {
+      "id": "v66",
+      "input_path": "/root/workspace/video/66.mp4",
+      "output_path": "./output/fleet/v66.mp4"
+    },
+    {
+      "id": "v67",
+      "input_path": "/root/workspace/video/67.mp4",
+      "output_path": "./output/fleet/v67.mp4"
+    },
+    {
+      "id": "v68",
+      "input_path": "/root/workspace/video/68.mp4",
+      "output_path": "./output/fleet/v68.mp4"
+    },
+    {
+      "id": "v69",
+      "input_path": "/root/workspace/video/69.mp4",
+      "output_path": "./output/fleet/v69.mp4"
+    },
+    {
+      "id": "v70",
+      "input_path": "/root/workspace/video/70.mp4",
+      "output_path": "./output/fleet/v70.mp4"
+    },
+    {
+      "id": "v71",
+      "input_path": "/root/workspace/video/71.mp4",
+      "output_path": "./output/fleet/v71.mp4"
+    },
+    {
+      "id": "v72",
+      "input_path": "/root/workspace/video/72.mp4",
+      "output_path": "./output/fleet/v72.mp4"
+    },
+    {
+      "id": "v73",
+      "input_path": "/root/workspace/video/73.mp4",
+      "output_path": "./output/fleet/v73.mp4"
+    },
+    {
+      "id": "v74",
+      "input_path": "/root/workspace/video/74.mp4",
+      "output_path": "./output/fleet/v74.mp4"
+    },
+    {
+      "id": "v75",
+      "input_path": "/root/workspace/video/75.mp4",
+      "output_path": "./output/fleet/v75.mp4"
+    }
+  ],
+  "vmaf_threshold": 93,
+  "codec_mode": "ABR",
+  "encoder": "libx265",
+  "fleet_batch_size": 2,
+  "fleet_gpu_slots": 0,
+  "vbr_mode_max_parallel": 2,
+  "libx265_refine_preset": "fast",
+  "libx265_feature_baseline": true,
+  "libx265_profile": "main",
+  "libx265_params": "aq-mode=2:aq-strength=1:rd=6:ref=6:bframes=8:rc-lookahead=50:keyint=60:min-keyint=1:scenecut=50",
+  "libx265_crf_min": 22,
+  "libx265_crf_max": 42,
+  "param_tune": true,
+  "param_tune_max_trials": 25,
+  "param_tune_no_improve_stop": 10,
+  "param_tune_vmaf_headroom": 2.0,
+  "param_tune_max_rounds": 4,
+  "time_budget_sec": 0,
+  "final_encode_reserve_sec": 0,
+  "probe_min_budget_sec": 0,
+  "crf_search_increment": 1,
+  "crf_search_max_encoded_percent": 80.0,
+  "crf_search_max_runs": 6,
+  "crf_search_near_vmaf_band": 1.5,
+  "vmaf_n_subsample": 1,
+  "vmaf_n_threads": 16,
+  "vmaf_docker_gpus": true,
+  "work_dir": "work_fleet",
+  "target_bitrate": "7.8M",
+  "vbr_mode_tune": true,
+  "vbr_mode_proxy_seconds_per_scene": 2.0,
+  "preprocess_auto": true,
+  "preprocess_ab": true,
+  "preprocess_sweep": false
+}

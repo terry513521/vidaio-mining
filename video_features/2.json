@@ -1,10 +1,10 @@
 {
   "video": "2.mp4",
-  "path": "/root/terry/videos/2.mp4",
-  "extracted_at": "2026-07-17T18:18:44Z",
-  "elapsed_sec": 20.814,
+  "path": "/root/workspace/video/2.mp4",
+  "extracted_at": "2026-07-21T06:06:58Z",
+  "elapsed_sec": 21.028,
   "meta": {
-    "path": "/root/terry/videos/2.mp4",
+    "path": "../video/2.mp4",
     "width": 3840,
     "height": 2160,
     "fps": 30.0,

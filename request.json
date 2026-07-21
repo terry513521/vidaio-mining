@@ -385,6 +385,7 @@
   "libx265_refine_preset": "fast",
   "libx265_feature_baseline": true,
   "libx265_profile": "main",
+  "libx265_params": "aq-mode=2:aq-strength=1:rd=6:ref=6:bframes=12:rc-lookahead=50:keyint=60:min-keyint=1:scenecut=50",
   "libx265_crf_min": 22,
   "libx265_crf_max": 42,
   "crf_start": 30,

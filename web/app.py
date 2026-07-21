@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -40,6 +41,9 @@ from analyze_compression_log import (  # noqa: E402
     parse_log_lines,
     parse_uid_args,
 )
+from vbr_mode import build_vbr_mode_params  # noqa: E402
+
+_DEFAULT_LIBX265_PARAMS = build_vbr_mode_params({})[0]
 
 HOST = os.environ.get("WEB_HOST", "0.0.0.0")
 PORT = int(os.environ.get("WEB_PORT", "8082"))
@@ -78,6 +82,8 @@ def _append_fetch_log(line: str) -> None:
 
 _compress_lock = threading.Lock()
 _COMPRESS_LOG_MAX = 200_000
+_compress_proc: subprocess.Popen[str] | None = None
+_compress_stop_requested = False
 _compress_status: dict[str, Any] = {
     "running": False,
     "phase": "idle",
@@ -99,7 +105,11 @@ _analyze_status: dict[str, Any] = {
     "errors": [],
     "params": {},
     "result": None,
+    "has_cache": False,
 }
+# In-memory score rows from the last WandB fetch (Search reuses these).
+_analyze_score_cache: list[Any] = []
+_ANALYZE_CACHE_PATH = ROOT / "wandb_output.log"
 
 
 def _append_compress_log(line: str) -> None:
@@ -110,6 +120,142 @@ def _append_compress_log(line: str) -> None:
         if len(merged) > _COMPRESS_LOG_MAX:
             merged = merged[-_COMPRESS_LOG_MAX:]
         _compress_status["log"] = merged
+        _compress_status["log_lines"] = merged.count("\n")
+
+
+def _stream_subprocess_output(
+    proc: subprocess.Popen[str],
+    append: Any,
+) -> int:
+    """Read subprocess stdout line-by-line until the process exits."""
+    assert proc.stdout is not None
+
+    def _reader() -> None:
+        for line in proc.stdout:
+            append(line.rstrip("\r\n"))
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    return_code = proc.wait()
+    reader.join(timeout=30.0)
+    return return_code
+
+
+def _set_compress_proc(proc: subprocess.Popen[str] | None) -> None:
+    global _compress_proc
+    with _compress_lock:
+        _compress_proc = proc
+
+
+def _compress_should_stop() -> bool:
+    with _compress_lock:
+        return bool(_compress_stop_requested)
+
+
+def _terminate_compress_proc(proc: subprocess.Popen[str]) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError:
+        try:
+            proc.terminate()
+        except OSError:
+            return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
+def _dashboard_compress_pids() -> list[int]:
+    """PIDs for dashboard-started main_batch.py runs."""
+    marker = str(ROOT / "work_fleet" / "dashboard_request.json")
+    pids: list[int] = []
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = proc.info.get("cmdline") or []
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        text = " ".join(str(part) for part in cmdline)
+        if "main_batch.py" not in text:
+            continue
+        if marker not in text and "work_fleet/dashboard_request.json" not in text:
+            continue
+        pid = proc.info.get("pid")
+        if isinstance(pid, int):
+            pids.append(pid)
+    return pids
+
+
+def _terminate_pid_tree(pid: int) -> None:
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        try:
+            proc.terminate()
+        except psutil.NoSuchProcess:
+            return
+    gone, alive = psutil.wait_procs([proc], timeout=5)
+    if alive:
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+
+def stop_compression() -> dict[str, Any]:
+    global _compress_stop_requested
+    with _compress_lock:
+        if not _compress_status["running"]:
+            killed = False
+            for pid in _dashboard_compress_pids():
+                _terminate_pid_tree(pid)
+                killed = True
+            if killed:
+                _append_compress_log("Stop requested — terminated orphaned compression subprocess")
+                _compress_status["running"] = False
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+                _compress_status["exit_code"] = -1
+                return {"stopped": True, "status": dict(_compress_status)}
+            return {"stopped": False, "status": dict(_compress_status)}
+        _compress_stop_requested = True
+        proc = _compress_proc
+    killed = False
+    if proc is not None and proc.poll() is None:
+        _append_compress_log("Stop requested — terminating compression…")
+        _terminate_compress_proc(proc)
+        killed = True
+    else:
+        for pid in _dashboard_compress_pids():
+            _append_compress_log(f"Stop requested — terminating compression (pid {pid})…")
+            _terminate_pid_tree(pid)
+            killed = True
+        if not killed:
+            _append_compress_log("Stop requested — waiting for compression to start…")
+    if killed:
+        with _compress_lock:
+            if _compress_status["running"]:
+                _compress_status["running"] = False
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+                _compress_status["exit_code"] = -1
+    return {"stopped": True, "status": compress_status()}
 
 
 def _read_json(path: Path) -> Any:
@@ -355,7 +501,36 @@ _ENCODE_PARAM_KEYS = (
     "proxy_max_seconds",
     "proxy_vmaf_margin",
     "proxy_mashup_push_ceiling",
+    "vmaf_n_threads",
+    "preprocess",
+    "preprocess_auto",
+    "preprocess_ab",
+    "preprocess_sweep",
+    "vbr_mode_tune",
+    "param_tune",
+    "crf_mode_tune",
+    "scene_crf_search",
+    "vbr_fallback_to_crf",
 )
+
+# Dashboard test path: one full-file encode at fixed libx265-params, no search/tune.
+_DASHBOARD_RUN_DEFAULTS: dict[str, Any] = {
+    "preprocess": "none",
+    "preprocess_auto": False,
+    "preprocess_ab": False,
+    "preprocess_sweep": False,
+    "vbr_mode_tune": False,
+    "param_tune": False,
+    "libx265_feature_baseline": False,
+    "crf_mode_tune": False,
+    "scene_crf_search": False,
+    "vbr_fallback_to_crf": False,
+}
+
+
+def _apply_dashboard_run_defaults(base: dict[str, Any]) -> None:
+    for key, value in _DASHBOARD_RUN_DEFAULTS.items():
+        base[key] = value
 
 
 def _shared_request_params() -> dict[str, Any]:
@@ -379,6 +554,25 @@ def encode_defaults() -> dict[str, Any]:
         out["crf_min"] = out["libx265_crf_min"]
     if "crf_max" not in out and "libx265_crf_max" in out:
         out["crf_max"] = out["libx265_crf_max"]
+    if data.get("target_bitrate"):
+        out["target_bitrate"] = data["target_bitrate"]
+    if data.get("target_compression_rate") is not None:
+        out["target_compression_rate"] = data["target_compression_rate"]
+    if not out.get("libx265_params"):
+        out["libx265_params"] = _DEFAULT_LIBX265_PARAMS
+    for key, default in (
+        ("crf_min", 8),
+        ("crf_max", 40),
+        ("crf_candidates", 3),
+        ("crf_spread", 2),
+        ("vmaf_n_threads", 10),
+    ):
+        if key not in out:
+            out[key] = default
+    out["vmaf_n_threads"] = 10
+    out["run_no_preprocess"] = True
+    out["run_full_video"] = True
+    out["libx265_feature_baseline"] = False
     return out
 
 
@@ -395,6 +589,14 @@ def _merge_encode_params(base: dict[str, Any], encode_params: dict[str, Any] | N
             "libx265_feature_baseline",
             "nvenc_feature_baseline",
             "use_proxy",
+            "preprocess_auto",
+            "preprocess_ab",
+            "preprocess_sweep",
+            "vbr_mode_tune",
+            "param_tune",
+            "crf_mode_tune",
+            "scene_crf_search",
+            "vbr_fallback_to_crf",
         }:
             base[key] = bool(value)
         elif key in {
@@ -405,6 +607,7 @@ def _merge_encode_params(base: dict[str, Any], encode_params: dict[str, Any] | N
             "crf_min",
             "crf_max",
             "crf_spread",
+            "vmaf_n_threads",
             "time_budget_sec",
             "final_encode_reserve_sec",
             "proxy_seconds_per_segment",
@@ -412,14 +615,27 @@ def _merge_encode_params(base: dict[str, Any], encode_params: dict[str, Any] | N
             "proxy_vmaf_margin",
             "proxy_mashup_push_ceiling",
         }:
-            base[key] = int(value) if key not in {
-                "time_budget_sec",
-                "final_encode_reserve_sec",
-                "proxy_seconds_per_segment",
-                "proxy_max_seconds",
-                "proxy_vmaf_margin",
-                "proxy_mashup_push_ceiling",
-            } else float(value)
+            if isinstance(value, bool):
+                continue
+            try:
+                if key in {
+                    "time_budget_sec",
+                    "final_encode_reserve_sec",
+                    "proxy_seconds_per_segment",
+                    "proxy_max_seconds",
+                    "proxy_vmaf_margin",
+                    "proxy_mashup_push_ceiling",
+                }:
+                    parsed: int | float = float(value)
+                else:
+                    parsed = int(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, float) and parsed != parsed:
+                continue
+            if key in {"crf_candidates", "crf_spread", "vmaf_n_threads"} and parsed < 1:
+                continue
+            base[key] = parsed
         else:
             base[key] = str(value).strip() if isinstance(value, str) else value
 
@@ -538,6 +754,7 @@ def _catalog_entry(
     job_id = str(job.get("id") or "") or None
     compressed = _compressed_path_for_job(job, batch) if job else None
     best = (batch or {}).get("best") or {}
+    result_mtime = _result_mtime_for_job(job_id, batch, compressed)
     return {
         "name": name,
         "job_id": job_id,
@@ -555,9 +772,52 @@ def _catalog_entry(
         "strategy": (batch or {}).get("strategy"),
         "chosen_crf": (batch or {}).get("chosen_crf") or best.get("crf"),
         "error": (batch or {}).get("error") or None,
+        "result_mtime": result_mtime,
+        "result_mtime_iso": (
+            datetime.fromtimestamp(result_mtime, tz=timezone.utc).isoformat()
+            if result_mtime is not None
+            else None
+        ),
         "request_params": _request_params_for_job(job, shared_request) if job else shared_request,
         "encode_params": _encode_params_from_result(batch),
     }
+
+
+def _result_mtime_for_job(
+    job_id: str | None,
+    batch: dict[str, Any] | None,
+    compressed: Path | None,
+) -> float | None:
+    """Newest mtime among compressed output and work_fleet result.json."""
+    mtimes: list[float] = []
+    if compressed is not None and compressed.is_file():
+        try:
+            mtimes.append(compressed.stat().st_mtime)
+        except OSError:
+            pass
+    if job_id:
+        work = ROOT / "work_fleet"
+        candidates: list[Path] = [work / job_id / "result.json"]
+        if batch and batch.get("vmaf_threshold") is not None:
+            try:
+                thr = str(int(batch["vmaf_threshold"]))
+                candidates.insert(0, work / thr / job_id / "result.json")
+            except (TypeError, ValueError):
+                pass
+        if work.is_dir():
+            candidates.extend(work.glob(f"*/{job_id}/result.json"))
+        seen: set[Path] = set()
+        for path in candidates:
+            resolved = path.resolve() if path.exists() else path
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if path.is_file():
+                try:
+                    mtimes.append(path.stat().st_mtime)
+                except OSError:
+                    pass
+    return max(mtimes) if mtimes else None
 
 
 def build_catalog() -> list[dict[str, Any]]:
@@ -607,14 +867,12 @@ def build_catalog() -> list[dict[str, Any]]:
                 )
             )
 
-    # Natural-ish order: 1.mp4 before 10.mp4 when numeric.
-    def _sort_key(item: dict[str, Any]) -> tuple[int, str]:
-        stem = Path(item["name"]).stem
-        if stem.isdigit():
-            return (0, f"{int(stem):08d}")
-        if stem.startswith("v") and stem[1:].isdigit():
-            return (0, f"{int(stem[1:]):08d}")
-        return (1, item["name"].lower())
+    # Newest results first; unfinished / no-mtime entries last.
+    def _sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+        mtime = item.get("result_mtime")
+        if mtime is None:
+            return (1, 0.0, item["name"].lower())
+        return (0, -float(mtime), item["name"].lower())
 
     entries.sort(key=_sort_key)
     return entries
@@ -806,9 +1064,12 @@ def _download_wandb_log_text(log_url: str, timeout: float = 120.0) -> str:
 
 
 def _wandb_discover_output_log() -> tuple[str, str, str]:
-    """Find the best validator output.log in the workspace.
+    """Find the current validator output.log in the WandB workspace.
 
-    Picks the run with the most compression URLs; ties go to the newest heartbeat.
+    Prefers the newest heartbeat among validator runs that contain compression
+    challenge URLs or score_compressions lines (not the historically largest
+    log, which often has expired S3 links).
+
     Set WANDB_RUN to force a specific run.
     """
     if WANDB_RUN:
@@ -822,11 +1083,9 @@ def _wandb_discover_output_log() -> tuple[str, str, str]:
             f"No validator runs found in WandB workspace {WANDB_ENTITY}/{WANDB_PROJECT}"
         )
 
-    best_run: str | None = None
-    best_url: str | None = None
-    best_text: str | None = None
-    best_count = -1
-    best_heartbeat = ""
+    # API returns runs ordered by -heartbeatAt (newest first).
+    best_fallback: tuple[str, str, str, str, int, int] | None = None
+    # (run, url, text, heartbeat, url_count, score_count)
 
     for run in runs:
         run_name = str(run.get("name") or "")
@@ -835,31 +1094,46 @@ def _wandb_discover_output_log() -> tuple[str, str, str]:
             log_url = _wandb_run_output_log_url(run_name)
             log_text = _download_wandb_log_text(log_url)
             url_count = len(_extract_compression_urls(log_text))
+            score_count = log_text.count("score_compressions")
         except (urllib.error.URLError, TimeoutError, OSError, RuntimeError, ValueError) as exc:
             _append_fetch_log(f"Skipped {run_name}: {exc}")
             continue
 
         _append_fetch_log(
-            f"Checked {run_name}: {url_count} compression URL(s), heartbeat {heartbeat or '—'}"
+            f"Checked {run_name}: {url_count} compression URL(s), "
+            f"{score_count} score line(s), heartbeat {heartbeat or '—'}"
         )
-        if url_count > best_count or (url_count == best_count and heartbeat > best_heartbeat):
-            best_run = run_name
-            best_url = log_url
-            best_text = log_text
-            best_count = url_count
-            best_heartbeat = heartbeat
-        if best_count >= 35:
-            break
 
-    if not best_run or not best_url or best_text is None or best_count <= 0:
-        raise RuntimeError(
-            "No validator output.log with compression challenge URLs found in WandB workspace"
-        )
-    return best_run, best_url, best_text
+        if url_count <= 0 and score_count <= 0:
+            continue
+
+        # Newest run with live challenge URLs wins immediately.
+        if url_count > 0:
+            return run_name, log_url, log_text
+
+        # Otherwise keep newest score-only run as fallback (analyze still works).
+        if best_fallback is None:
+            best_fallback = (
+                run_name,
+                log_url,
+                log_text,
+                heartbeat,
+                url_count,
+                score_count,
+            )
+
+    if best_fallback is not None:
+        return best_fallback[0], best_fallback[1], best_fallback[2]
+
+    raise RuntimeError(
+        "No validator output.log with compression scores/URLs found in WandB workspace"
+    )
 
 
 def _extract_compression_urls(log_text: str) -> list[str]:
+    """Extract challenge video URLs; keep the latest signed URL per object path."""
     by_path: dict[str, str] = {}
+    order: list[str] = []
     for line in log_text.splitlines():
         low = line.lower()
         if "compression" not in low and "score_compressions" not in low:
@@ -870,8 +1144,10 @@ def _extract_compression_urls(log_text: str) -> list[str]:
                 continue
             path = urlparse(url).path
             if path not in by_path:
-                by_path[path] = url
-    return list(by_path.values())
+                order.append(path)
+            # Prefer later (fresher) signed URLs for the same object.
+            by_path[path] = url
+    return [by_path[path] for path in order]
 
 
 def _download_file(url: str, dest: Path, timeout: float = 600.0) -> None:
@@ -1027,6 +1303,7 @@ def _write_dashboard_request(
     codec_mode: str,
     vmaf_threshold: int,
     target_bitrate: str | None,
+    target_compression_rate: float | None,
     video_names: list[str],
     encode_params: dict[str, Any] | None = None,
 ) -> Path:
@@ -1039,11 +1316,22 @@ def _write_dashboard_request(
     base["vmaf_threshold"] = vmaf_threshold
     base["codec_mode"] = _normalize_dashboard_codec_mode(codec_mode)
     if base["codec_mode"] == "ABR":
-        if not target_bitrate:
-            raise ValueError("target_bitrate is required for vbr mode")
-        base["target_bitrate"] = target_bitrate
+        if not str(target_bitrate or "").strip() and target_compression_rate is None:
+            raise ValueError(
+                "target_bitrate or target_compression_rate is required for vbr mode"
+            )
+        if str(target_bitrate or "").strip():
+            base["target_bitrate"] = str(target_bitrate).strip()
+        else:
+            base.pop("target_bitrate", None)
+        if target_compression_rate is not None:
+            base["target_compression_rate"] = float(target_compression_rate)
+        else:
+            base.pop("target_compression_rate", None)
     else:
         base.pop("target_bitrate", None)
+        base.pop("target_compression_rate", None)
+    _apply_dashboard_run_defaults(base)
     _merge_encode_params(base, encode_params)
 
     req_path = ROOT / "work_fleet" / "dashboard_request.json"
@@ -1057,13 +1345,15 @@ def run_compression_sync(
     codec_mode: str,
     vmaf_threshold: int,
     target_bitrate: str | None,
+    target_compression_rate: float | None,
     video_names: list[str],
     encode_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    global _compress_status
+    global _compress_status, _compress_stop_requested
     with _compress_lock:
         if _compress_status["running"]:
             return dict(_compress_status)
+        _compress_stop_requested = False
         _compress_status = {
             "running": True,
             "phase": "preparing",
@@ -1076,6 +1366,7 @@ def run_compression_sync(
                 "codec_mode": codec_mode,
                 "vmaf_threshold": vmaf_threshold,
                 "target_bitrate": target_bitrate,
+                "target_compression_rate": target_compression_rate,
                 "encode_params": encode_params or {},
             },
             "log": "",
@@ -1086,11 +1377,21 @@ def run_compression_sync(
             codec_mode=codec_mode,
             vmaf_threshold=vmaf_threshold,
             target_bitrate=target_bitrate,
+            target_compression_rate=target_compression_rate,
             video_names=video_names,
             encode_params=encode_params,
         )
+        if _compress_should_stop():
+            _append_compress_log("Stopped by user")
+            with _compress_lock:
+                _compress_status["running"] = False
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+                _compress_status["exit_code"] = -1
+            return dict(_compress_status)
         cmd = [
             sys.executable,
+            "-u",
             str(ROOT / "main_batch.py"),
             "-r",
             str(req_path),
@@ -1110,8 +1411,20 @@ def run_compression_sync(
                 f"Compressing {len(video_names)} video(s) "
                 f"({codec_mode}, VMAF {vmaf_threshold})"
             )
+            _compress_status["log_lines"] = 0
         _append_compress_log(f"$ {' '.join(cmd)}")
 
+        if _compress_should_stop():
+            _append_compress_log("Stopped by user")
+            with _compress_lock:
+                _compress_status["running"] = False
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+                _compress_status["exit_code"] = -1
+            return dict(_compress_status)
+
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
@@ -1119,19 +1432,27 @@ def run_compression_sync(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
+            start_new_session=True,
         )
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            _append_compress_log(line.rstrip("\n"))
-        return_code = proc.wait()
+        _set_compress_proc(proc)
+        try:
+            return_code = _stream_subprocess_output(proc, _append_compress_log)
+        finally:
+            _set_compress_proc(None)
 
         with _compress_lock:
+            stopped = bool(_compress_stop_requested)
             _compress_status["running"] = False
-            _compress_status["phase"] = "done" if return_code == 0 else "error"
             _compress_status["exit_code"] = return_code
-            if return_code == 0:
+            if stopped or return_code in (-signal.SIGTERM, -signal.SIGKILL):
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+            elif return_code == 0:
+                _compress_status["phase"] = "done"
                 _compress_status["message"] = f"Compression finished for {len(video_names)} video(s)"
             else:
+                _compress_status["phase"] = "error"
                 log_text = str(_compress_status.get("log") or "").strip()
                 _compress_status["message"] = (
                     log_text.splitlines()[-1] if log_text else "compression failed"
@@ -1143,10 +1464,16 @@ def run_compression_sync(
         _append_compress_log(f"ERROR: {exc}")
         with _compress_lock:
             _compress_status["running"] = False
-            _compress_status["phase"] = "error"
-            _compress_status["message"] = str(exc)
-            _compress_status["errors"].append(str(exc))
+            if _compress_stop_requested:
+                _compress_status["phase"] = "stopped"
+                _compress_status["message"] = "Compression stopped by user"
+            else:
+                _compress_status["phase"] = "error"
+                _compress_status["message"] = str(exc)
+                _compress_status["errors"].append(str(exc))
         return dict(_compress_status)
+    finally:
+        _set_compress_proc(None)
 
 
 def _start_compress_thread(
@@ -1154,6 +1481,7 @@ def _start_compress_thread(
     codec_mode: str,
     vmaf_threshold: int,
     target_bitrate: str | None,
+    target_compression_rate: float | None,
     video_names: list[str],
     encode_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1166,6 +1494,7 @@ def _start_compress_thread(
             "codec_mode": codec_mode,
             "vmaf_threshold": vmaf_threshold,
             "target_bitrate": target_bitrate,
+            "target_compression_rate": target_compression_rate,
             "video_names": video_names,
             "encode_params": encode_params,
         },
@@ -1246,25 +1575,33 @@ def analyze_validator_log(
     *,
     path: Path | None = None,
     text: str | None = None,
+    scores: list[Any] | None = None,
     codec: str | None = None,
+    mode: str | None = None,
+    vmaf_threshold: float | None = None,
     uids: list[int] | None = None,
     failures_only: bool = False,
 ) -> dict[str, Any]:
-    if text is not None:
-        log_text = text
+    if scores is not None:
+        source = "cache"
+        source_path = str(_ANALYZE_CACHE_PATH) if _ANALYZE_CACHE_PATH.is_file() else None
+        all_scores = scores
+    elif text is not None:
         source = "paste"
         source_path = None
-        _challenges, scores = parse_log_lines(log_text.splitlines())
+        _challenges, all_scores = parse_log_lines(text.splitlines())
     elif path is not None:
         source = "file"
         source_path = str(path)
-        _challenges, scores = parse_log(str(path))
+        _challenges, all_scores = parse_log(str(path))
     else:
-        raise ValueError("path or text is required")
+        raise ValueError("path, text, or scores is required")
 
     rows = filter_scores(
-        scores,
+        all_scores,
         codec=codec or None,
+        mode=mode or None,
+        vmaf_threshold=vmaf_threshold,
         include_failures=failures_only,
         uids=uids or None,
     )
@@ -1280,15 +1617,15 @@ def analyze_validator_log(
         by_chal[key].setdefault(row.uid, []).append(row)
 
     challenges: list[dict[str, Any]] = []
-    for codec_name, mode, thr in chal_order:
-        uid_map = by_chal[(codec_name, mode, thr)]
+    for codec_name, mode_name, thr in chal_order:
+        uid_map = by_chal[(codec_name, mode_name, thr)]
         ranked_uids = sorted(
             uid_map.keys(),
             key=lambda u: (-mean(x.final for x in uid_map[u]), u),
         )
         uid_blocks: list[dict[str, Any]] = []
         for uid in ranked_uids:
-            uid_rows = uid_map[uid]
+            uid_rows = sorted(uid_map[uid], key=lambda r: (-r.final, r.video_idx or 0))
             uid_blocks.append(
                 {
                     "uid": uid,
@@ -1304,27 +1641,71 @@ def analyze_validator_log(
         challenges.append(
             {
                 "codec": codec_name,
-                "mode": mode,
+                "mode": mode_name,
                 "vmaf_threshold": thr,
                 "uids": uid_blocks,
+                "top_mean_final": uid_blocks[0]["mean_final"] if uid_blocks else 0.0,
             }
         )
+
+    # Challenges with higher top mean_final first (then thr / codec for stability).
+    challenges.sort(
+        key=lambda c: (
+            -float(c.get("top_mean_final") or 0.0),
+            -float(c.get("vmaf_threshold") or 0.0),
+            str(c.get("codec") or ""),
+            str(c.get("mode") or ""),
+        )
+    )
 
     return {
         "source": source,
         "path": source_path,
-        "total_scores": len(scores),
+        "total_scores": len(all_scores),
         "filtered": len(rows),
         "codec_filter": codec or None,
+        "mode_filter": mode or None,
+        "vmaf_threshold_filter": vmaf_threshold,
         "uid_filter": uids or None,
         "failures_only": failures_only,
         "challenges": challenges,
     }
 
 
+def _parse_analyze_filters(body: dict[str, Any]) -> dict[str, Any]:
+    codec = str(body.get("codec") or "").strip().lower() or None
+    if codec == "all":
+        codec = None
+    mode = str(body.get("mode") or body.get("codec_mode") or "").strip().lower() or None
+    if mode in {"", "all"}:
+        mode = None
+    thr_raw = body.get("vmaf_threshold")
+    vmaf_threshold: float | None = None
+    if thr_raw is not None and str(thr_raw).strip() not in {"", "all"}:
+        vmaf_threshold = float(thr_raw)
+    failures_only = bool(body.get("failures_only"))
+    uid_raw = body.get("uids") or body.get("uid")
+    if isinstance(uid_raw, list):
+        uid_parts = [str(x) for x in uid_raw]
+    elif uid_raw is None or uid_raw == "":
+        uid_parts = []
+    else:
+        uid_parts = [str(uid_raw)]
+    uids = parse_uid_args(uid_parts) if uid_parts else []
+    return {
+        "codec": codec,
+        "mode": mode,
+        "vmaf_threshold": vmaf_threshold,
+        "uids": uids or None,
+        "failures_only": failures_only,
+    }
+
+
 def analyze_status() -> dict[str, Any]:
     with _analyze_lock:
-        return dict(_analyze_status)
+        status = dict(_analyze_status)
+        status["has_cache"] = bool(_analyze_score_cache) or _ANALYZE_CACHE_PATH.is_file()
+        return status
 
 
 def clear_analyze_status() -> dict[str, Any]:
@@ -1340,17 +1721,75 @@ def clear_analyze_status() -> dict[str, Any]:
             "errors": [],
             "params": {},
             "result": None,
+            "has_cache": bool(_analyze_score_cache) or _ANALYZE_CACHE_PATH.is_file(),
         }
         return {"cleared": True, "status": dict(_analyze_status)}
+
+
+def _ensure_score_cache() -> tuple[list[Any], str | None]:
+    """Return cached ScoreRows, loading from wandb_output.log if needed."""
+    global _analyze_score_cache
+    with _analyze_lock:
+        if _analyze_score_cache:
+            return list(_analyze_score_cache), _analyze_status.get("wandb_run")
+        wandb_run = _analyze_status.get("wandb_run")
+    if _ANALYZE_CACHE_PATH.is_file():
+        _challenges, scores = parse_log(str(_ANALYZE_CACHE_PATH))
+        with _analyze_lock:
+            _analyze_score_cache = scores
+            _analyze_status["has_cache"] = True
+        return list(scores), wandb_run
+    raise RuntimeError("No cached log yet — click Analyze from WandB first")
+
+
+def search_analyze_cache(
+    *,
+    codec: str | None,
+    mode: str | None,
+    vmaf_threshold: float | None,
+    uids: list[int] | None,
+    failures_only: bool,
+) -> dict[str, Any]:
+    """Re-filter the cached WandB log without downloading again."""
+    scores, wandb_run = _ensure_score_cache()
+    result = analyze_validator_log(
+        scores=scores,
+        codec=codec,
+        mode=mode,
+        vmaf_threshold=vmaf_threshold,
+        uids=uids,
+        failures_only=failures_only,
+    )
+    if wandb_run:
+        result["wandb_run"] = wandb_run
+    result["cached_path"] = str(_ANALYZE_CACHE_PATH)
+    with _analyze_lock:
+        _analyze_status["phase"] = "done"
+        _analyze_status["result"] = result
+        _analyze_status["params"] = {
+            "codec": codec,
+            "mode": mode,
+            "vmaf_threshold": vmaf_threshold,
+            "uids": uids or [],
+            "failures_only": failures_only,
+        }
+        _analyze_status["message"] = (
+            f"{result['filtered']} / {result['total_scores']} scores"
+            + (f" from {wandb_run}" if wandb_run else " (cached log)")
+        )
+        _analyze_status["has_cache"] = True
+        return dict(_analyze_status)
 
 
 def run_analyze_wandb_sync(
     *,
     codec: str | None,
+    mode: str | None,
+    vmaf_threshold: float | None,
     uids: list[int] | None,
     failures_only: bool,
 ) -> dict[str, Any]:
-    global _analyze_status
+    global _analyze_status, _analyze_score_cache
     with _analyze_lock:
         if _analyze_status["running"]:
             return dict(_analyze_status)
@@ -1362,16 +1801,18 @@ def run_analyze_wandb_sync(
             "errors": [],
             "params": {
                 "codec": codec,
+                "mode": mode,
+                "vmaf_threshold": vmaf_threshold,
                 "uids": uids or [],
                 "failures_only": failures_only,
             },
             "result": None,
+            "has_cache": False,
         }
 
     try:
         run_name, log_url, log_text = _wandb_discover_output_log()
-        cache_path = ROOT / "wandb_output.log"
-        cache_path.write_text(log_text, encoding="utf-8")
+        _ANALYZE_CACHE_PATH.write_text(log_text, encoding="utf-8")
         with _analyze_lock:
             _analyze_status["wandb_run"] = run_name
             _analyze_status["phase"] = "analyzing"
@@ -1379,15 +1820,22 @@ def run_analyze_wandb_sync(
                 f"Analyzing {run_name} ({len(log_text):,} bytes)…"
             )
 
+        _challenges, scores = parse_log_lines(log_text.splitlines())
+        with _analyze_lock:
+            _analyze_score_cache = scores
+            _analyze_status["has_cache"] = True
+
         result = analyze_validator_log(
-            text=log_text,
+            scores=scores,
             codec=codec,
+            mode=mode,
+            vmaf_threshold=vmaf_threshold,
             uids=uids,
             failures_only=failures_only,
         )
         result["wandb_run"] = run_name
         result["log_url"] = log_url.split("?")[0]
-        result["cached_path"] = str(cache_path)
+        result["cached_path"] = str(_ANALYZE_CACHE_PATH)
 
         with _analyze_lock:
             _analyze_status["running"] = False
@@ -1397,6 +1845,7 @@ def run_analyze_wandb_sync(
                 f"{result['filtered']} / {result['total_scores']} scores "
                 f"from {run_name}"
             )
+            _analyze_status["has_cache"] = True
         return dict(_analyze_status)
     except Exception as exc:  # noqa: BLE001
         with _analyze_lock:
@@ -1411,6 +1860,8 @@ def run_analyze_wandb_sync(
 def _start_analyze_wandb_thread(
     *,
     codec: str | None,
+    mode: str | None,
+    vmaf_threshold: float | None,
     uids: list[int] | None,
     failures_only: bool,
 ) -> dict[str, Any]:
@@ -1421,6 +1872,8 @@ def _start_analyze_wandb_thread(
         target=run_analyze_wandb_sync,
         kwargs={
             "codec": codec,
+            "mode": mode,
+            "vmaf_threshold": vmaf_threshold,
             "uids": uids,
             "failures_only": failures_only,
         },
@@ -1542,6 +1995,7 @@ class Handler(BaseHTTPRequestHandler):
             codec_mode = str(body.get("codec_mode") or "crf")
             vmaf_threshold = int(body.get("vmaf_threshold") or 85)
             target_bitrate = body.get("target_bitrate")
+            target_compression_rate_raw = body.get("target_compression_rate")
             videos = body.get("videos") or []
             if vmaf_threshold not in (85, 89, 93):
                 self._send_json(
@@ -1564,16 +2018,44 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
-            if codec_mode.lower() in {"vbr", "abr", "bitrate"} and not target_bitrate:
-                self._send_json(
-                    {"error": "target_bitrate is required for vbr mode"},
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
+            if codec_mode.lower() in {"vbr", "abr", "bitrate"}:
+                target_bitrate_text = str(target_bitrate or "").strip()
+                target_compression_rate: float | None = None
+                if target_compression_rate_raw not in (None, ""):
+                    try:
+                        target_compression_rate = float(target_compression_rate_raw)
+                    except (TypeError, ValueError):
+                        self._send_json(
+                            {"error": "target_compression_rate must be a number in (0, 1)"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not (0.0 < target_compression_rate < 1.0):
+                        self._send_json(
+                            {"error": "target_compression_rate must be in (0, 1)"},
+                            HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                if not target_bitrate_text and target_compression_rate is None:
+                    self._send_json(
+                        {
+                            "error": (
+                                "target_bitrate or target_compression_rate "
+                                "is required for vbr mode"
+                            )
+                        },
+                        HTTPStatus.BAD_REQUEST,
+                    )
+                    return
+                target_bitrate = target_bitrate_text or None
+            else:
+                target_bitrate = None
+                target_compression_rate = None
             result = _start_compress_thread(
                 codec_mode=codec_mode,
                 vmaf_threshold=vmaf_threshold,
                 target_bitrate=str(target_bitrate) if target_bitrate else None,
+                target_compression_rate=target_compression_rate,
                 video_names=video_names,
                 encode_params=body.get("encode_params")
                 if isinstance(body.get("encode_params"), dict)
@@ -1581,21 +2063,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._send_json(result)
             return
+        if parsed.path == "/api/compress-stop":
+            self._send_json(stop_compression())
+            return
         if parsed.path == "/api/analyze-log":
             body = self._read_json_body()
-            codec = str(body.get("codec") or "").strip().lower() or None
-            if codec == "all":
-                codec = None
-            failures_only = bool(body.get("failures_only"))
-            uid_raw = body.get("uids") or body.get("uid")
-            if isinstance(uid_raw, list):
-                uid_parts = [str(x) for x in uid_raw]
-            elif uid_raw is None or uid_raw == "":
-                uid_parts = []
-            else:
-                uid_parts = [str(uid_raw)]
             try:
-                uids = parse_uid_args(uid_parts) if uid_parts else []
+                filters = _parse_analyze_filters(body)
             except ValueError as exc:
                 self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
                 return
@@ -1607,9 +2081,11 @@ class Handler(BaseHTTPRequestHandler):
 
             if source in {"wandb", "fetch", "current"}:
                 result = _start_analyze_wandb_thread(
-                    codec=codec,
-                    uids=uids or None,
-                    failures_only=failures_only,
+                    codec=filters["codec"],
+                    mode=filters["mode"],
+                    vmaf_threshold=filters["vmaf_threshold"],
+                    uids=filters["uids"],
+                    failures_only=filters["failures_only"],
                 )
                 self._send_json(result)
                 return
@@ -1618,9 +2094,11 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     payload = analyze_validator_log(
                         text=paste,
-                        codec=codec,
-                        uids=uids or None,
-                        failures_only=failures_only,
+                        codec=filters["codec"],
+                        mode=filters["mode"],
+                        vmaf_threshold=filters["vmaf_threshold"],
+                        uids=filters["uids"],
+                        failures_only=filters["failures_only"],
                     )
                 except Exception as exc:  # noqa: BLE001
                     self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -1632,6 +2110,27 @@ class Handler(BaseHTTPRequestHandler):
                 {"error": "source must be wandb (default) or provide text"},
                 HTTPStatus.BAD_REQUEST,
             )
+            return
+
+        if parsed.path == "/api/analyze-search":
+            body = self._read_json_body()
+            try:
+                filters = _parse_analyze_filters(body)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                status = search_analyze_cache(
+                    codec=filters["codec"],
+                    mode=filters["mode"],
+                    vmaf_threshold=filters["vmaf_threshold"],
+                    uids=filters["uids"],
+                    failures_only=filters["failures_only"],
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json({"ok": True, "status": status})
             return
 
         if parsed.path == "/api/analyze-clear":

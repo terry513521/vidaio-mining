@@ -244,6 +244,14 @@
     .compress-status.running { color: var(--accent); }
     .compress-status.done { color: var(--good); }
     .compress-status.error { color: var(--warn); }
+    .compress-status.stopped { color: var(--warn); }
+    button.btn-stop {
+      border-color: var(--warn);
+      color: var(--warn);
+    }
+    button.btn-stop:hover:not(:disabled) {
+      background: rgba(255, 120, 80, 0.12);
+    }
     .compress-terminal {
       margin-top: 12px;
       background: #0a0e12;
@@ -389,19 +397,6 @@
       opacity: 0.85;
       cursor: default;
     }
-    .x265-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-      gap: 10px;
-      margin-top: 8px;
-    }
-    .subheading {
-      font-size: 0.78rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--muted);
-      margin: 8px 0;
-    }
     .pill.wide {
       max-width: 100%;
       overflow: hidden;
@@ -435,7 +430,7 @@
     <section class="fetch-panel">
       <div>
         <strong>Challenge videos</strong>
-        <div class="sub">Auto-discover validator output.log from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB workspace</a> and download challenge videos</div>
+        <div class="sub">Auto-discover the <strong>latest</strong> validator output.log from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB workspace</a> and download challenge videos</div>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <button id="fetch-challenges" type="button">Fetch from WandB</button>
@@ -454,7 +449,7 @@
 
     <section class="analyze-panel">
       <h2>Validator score log</h2>
-      <div class="sub">Fetch current validator <code>output.log</code> from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB</a> (same source as challenge videos) and group scores by UID → video</div>
+      <div class="sub">Fetch the <strong>latest</strong> validator <code>output.log</code> from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB</a>, then use <strong>Search</strong> to re-filter without re-downloading</div>
       <div class="analyze-row">
         <div class="field">
           <label for="analyze-codec">Codec</label>
@@ -462,6 +457,23 @@
             <option value="all">all</option>
             <option value="hevc" selected>hevc</option>
             <option value="av1">av1</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="analyze-mode">Codec mode</label>
+          <select id="analyze-mode">
+            <option value="all">all</option>
+            <option value="crf">crf</option>
+            <option value="vbr">vbr</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="analyze-vmaf-threshold">VMAF threshold</label>
+          <select id="analyze-vmaf-threshold">
+            <option value="all">all</option>
+            <option value="85">85</option>
+            <option value="89">89</option>
+            <option value="93">93</option>
           </select>
         </div>
         <div class="field">
@@ -475,6 +487,7 @@
           </label>
         </div>
         <button id="analyze-btn" type="button">Analyze from WandB</button>
+        <button id="analyze-search" type="button">Search</button>
         <button id="analyze-clear" type="button">Clear</button>
       </div>
       <div class="analyze-status" id="analyze-status">Ready</div>
@@ -502,7 +515,11 @@
         </div>
         <div class="field hidden" id="target-bitrate-field">
           <label for="target-bitrate">Target bitrate</label>
-          <input id="target-bitrate" type="text" placeholder="e.g. 8M" value="8M" />
+          <input id="target-bitrate" type="text" placeholder="e.g. 7.8M" value="" />
+        </div>
+        <div class="field hidden" id="target-rate-field">
+          <label for="target-compression-rate">Target compression rate</label>
+          <input id="target-compression-rate" type="number" step="0.001" min="0" max="1" placeholder="e.g. 0.04" value="" />
         </div>
         <div class="field">
           <label for="select-count">Select count</label>
@@ -517,6 +534,7 @@
         </div>
         <button id="select-videos" type="button">Select videos</button>
         <button id="compress-btn" type="button">Compress</button>
+        <button id="compress-stop-btn" type="button" class="btn-stop hidden">Stop</button>
       </div>
       <details class="encode-settings" open>
         <summary>Encode settings</summary>
@@ -557,6 +575,10 @@
             <label for="crf-spread">CRF spread</label>
             <input id="crf-spread" type="number" min="1" max="10" />
           </div>
+          <div class="field">
+            <label for="vmaf-n-threads">VMAF threads</label>
+            <input id="vmaf-n-threads" type="number" min="1" max="64" value="10" />
+          </div>
           <div class="field nvenc-only hidden">
             <label for="nvenc-rc">NVENC RC</label>
             <select id="nvenc-rc">
@@ -577,18 +599,26 @@
           </div>
           <div class="field">
             <label class="check" style="margin-top:22px;">
-              <input id="libx265-feature-baseline" type="checkbox" checked />
+              <input id="libx265-feature-baseline" type="checkbox" />
               Feature x265 baseline
+            </label>
+          </div>
+          <div class="field">
+            <label class="check" style="margin-top:22px;">
+              <input id="run-no-preprocess" type="checkbox" checked />
+              No preprocess
+            </label>
+          </div>
+          <div class="field">
+            <label class="check" style="margin-top:22px;">
+              <input id="run-full-video" type="checkbox" checked />
+              Full video
             </label>
           </div>
         </div>
         <div class="field field-wide libx265-only">
           <label for="libx265-params">x265-params (colon-separated)</label>
-          <textarea id="libx265-params" readonly placeholder="aq-mode=3:rd=5:ref=4:bframes=6:rc-lookahead=40:keyint=48:min-keyint=1:scenecut=40"></textarea>
-        </div>
-        <div class="libx265-only">
-          <div class="subheading">x265-params detail</div>
-          <div class="x265-grid" id="x265-detail-grid"></div>
+          <textarea id="libx265-params" rows="3" placeholder="aq-mode=2:aq-strength=1:rd=6:ref=6:bframes=8:rc-lookahead=50:keyint=60:min-keyint=1:scenecut=50"></textarea>
         </div>
       </details>
       <div class="video-pick">
@@ -646,65 +676,11 @@
     let fetchPollTimer = null;
     let compressPollTimer = null;
 
-    const X265_DETAIL_KEYS = [
-      ["aq-mode", "AQ mode"],
-      ["rd", "RD"],
-      ["ref", "Ref frames"],
-      ["bframes", "B-frames"],
-      ["rc-lookahead", "RC lookahead"],
-      ["keyint", "Keyint"],
-      ["min-keyint", "Min keyint"],
-      ["scenecut", "Scenecut"],
-      ["me", "ME"],
-      ["subme", "SubME"],
-      ["merange", "ME range"],
-    ];
-
     const LIBX265_PRESETS = [
       "ultrafast", "superfast", "veryfast", "faster", "fast",
       "medium", "slow", "slower", "veryslow", "placebo",
     ];
     const NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
-
-    function parseX265Params(text) {
-      const out = {};
-      for (const part of String(text || "").split(":")) {
-        const trimmed = part.trim();
-        if (!trimmed) continue;
-        const eq = trimmed.indexOf("=");
-        if (eq === -1) continue;
-        out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-      }
-      return out;
-    }
-
-    function renderX265DetailGrid() {
-      const grid = document.getElementById("x265-detail-grid");
-      grid.innerHTML = "";
-      for (const [key, label] of X265_DETAIL_KEYS) {
-        const wrap = document.createElement("div");
-        wrap.className = "field";
-        const lbl = document.createElement("label");
-        lbl.textContent = label;
-        lbl.setAttribute("for", `x265-${key}`);
-        const input = document.createElement("input");
-        input.id = `x265-${key}`;
-        input.type = "text";
-        input.readOnly = true;
-        input.dataset.x265Key = key;
-        wrap.appendChild(lbl);
-        wrap.appendChild(input);
-        grid.appendChild(wrap);
-      }
-    }
-
-    function syncX265TextareaToDetail() {
-      const params = parseX265Params(document.getElementById("libx265-params").value);
-      for (const input of document.querySelectorAll("#x265-detail-grid input")) {
-        const key = input.dataset.x265Key;
-        input.value = params[key] ?? "";
-      }
-    }
 
     function populatePresetOptions(encoder) {
       const preset = document.getElementById("preset");
@@ -738,19 +714,38 @@
         if (d.preset) document.getElementById("preset").value = d.preset;
         if (d.libx265_profile) document.getElementById("libx265-profile").value = d.libx265_profile;
         if (d.libx265_params) document.getElementById("libx265-params").value = d.libx265_params;
+        if (d.target_bitrate) document.getElementById("target-bitrate").value = d.target_bitrate;
+        if (d.target_compression_rate != null) {
+          document.getElementById("target-compression-rate").value = d.target_compression_rate;
+        }
         if (d.crf_min != null) document.getElementById("crf-min").value = d.crf_min;
         if (d.crf_max != null) document.getElementById("crf-max").value = d.crf_max;
         if (d.crf_candidates != null) document.getElementById("crf-candidates").value = d.crf_candidates;
         if (d.crf_spread != null) document.getElementById("crf-spread").value = d.crf_spread;
+        if (d.vmaf_n_threads != null) {
+          document.getElementById("vmaf-n-threads").value = d.vmaf_n_threads;
+        }
         if (d.nvenc_rc) document.getElementById("nvenc-rc").value = d.nvenc_rc;
         if (d.nvenc_multipass) document.getElementById("nvenc-multipass").value = d.nvenc_multipass;
         if (d.libx265_feature_baseline != null) {
           document.getElementById("libx265-feature-baseline").checked = Boolean(d.libx265_feature_baseline);
         }
-        syncX265TextareaToDetail();
+        if (d.run_no_preprocess != null) {
+          document.getElementById("run-no-preprocess").checked = Boolean(d.run_no_preprocess);
+        }
+        if (d.run_full_video != null) {
+          document.getElementById("run-full-video").checked = Boolean(d.run_full_video);
+        }
       } catch (err) {
         console.error(err);
       }
+    }
+
+    function parseOptionalInt(id) {
+      const raw = document.getElementById(id).value.trim();
+      if (raw === "") return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) ? Math.trunc(n) : undefined;
     }
 
     function collectEncodeParams() {
@@ -758,16 +753,40 @@
       const params = {
         encoder,
         preset: document.getElementById("preset").value,
-        crf_min: Number(document.getElementById("crf-min").value),
-        crf_max: Number(document.getElementById("crf-max").value),
-        crf_candidates: Number(document.getElementById("crf-candidates").value),
-        crf_spread: Number(document.getElementById("crf-spread").value),
         libx265_feature_baseline: document.getElementById("libx265-feature-baseline").checked,
       };
+      for (const [key, id] of [
+        ["crf_min", "crf-min"],
+        ["crf_max", "crf-max"],
+        ["crf_candidates", "crf-candidates"],
+        ["crf_spread", "crf-spread"],
+        ["vmaf_n_threads", "vmaf-n-threads"],
+      ]) {
+        const value = parseOptionalInt(id);
+        if (value != null) params[key] = value;
+      }
+      if (params.vmaf_n_threads == null) params.vmaf_n_threads = 10;
+      if (document.getElementById("run-no-preprocess").checked) {
+        params.preprocess = "none";
+        params.preprocess_auto = false;
+        params.preprocess_ab = false;
+        params.preprocess_sweep = false;
+      } else {
+        params.preprocess = null;
+        params.preprocess_auto = true;
+        params.preprocess_ab = true;
+      }
+      params.vbr_mode_tune = !document.getElementById("run-full-video").checked;
+      if (document.getElementById("run-full-video").checked) {
+        params.param_tune = false;
+        params.crf_mode_tune = false;
+        params.scene_crf_search = false;
+        params.vbr_fallback_to_crf = false;
+      }
       if (encoder === "libx265") {
         params.libx265_profile = document.getElementById("libx265-profile").value;
-        params.libx265_crf_min = params.crf_min;
-        params.libx265_crf_max = params.crf_max;
+        if (params.crf_min != null) params.libx265_crf_min = params.crf_min;
+        if (params.crf_max != null) params.libx265_crf_max = params.crf_max;
         const x265 = document.getElementById("libx265-params").value.trim();
         if (x265) params.libx265_params = x265;
       } else {
@@ -826,6 +845,19 @@
       return onlyCompressed ? catalog.filter(v => v.has_compressed) : catalog;
     }
 
+    function fmtResultTime(item) {
+      if (!item.result_mtime_iso) return "";
+      try {
+        const d = new Date(item.result_mtime_iso);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleString(undefined, {
+          month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+        });
+      } catch (_) {
+        return "";
+      }
+    }
+
     function populateSelect(preferredName) {
       const items = filteredCatalog();
       videoSelect.innerHTML = "";
@@ -837,7 +869,11 @@
         const opt = document.createElement("option");
         opt.value = item.name;
         const tag = item.has_compressed ? "✓ compressed" : "original only";
-        opt.textContent = `${item.name} (${tag})`;
+        const when = fmtResultTime(item);
+        const job = item.job_id ? ` · ${item.job_id}` : "";
+        opt.textContent = when
+          ? `${item.name}${job} · ${when} (${tag})`
+          : `${item.name}${job} (${tag})`;
         videoSelect.appendChild(opt);
       }
       const preferred = items.find(v => v.name === preferredName)
@@ -1032,7 +1068,9 @@
         input.value = item.name;
         input.checked = checked.has(item.name);
         label.appendChild(input);
-        label.appendChild(document.createTextNode(item.name));
+        const when = fmtResultTime(item);
+        const text = when ? `${item.name} · ${when}` : item.name;
+        label.appendChild(document.createTextNode(text));
         list.appendChild(label);
       }
       updateSelectedCount();
@@ -1059,6 +1097,28 @@
     function toggleTargetBitrateField() {
       const isVbr = document.getElementById("codec-mode").value === "vbr";
       document.getElementById("target-bitrate-field").classList.toggle("hidden", !isVbr);
+      document.getElementById("target-rate-field").classList.toggle("hidden", !isVbr);
+    }
+
+    function parseCompressionRate(raw) {
+      const text = String(raw ?? "").trim();
+      if (!text) return null;
+      const rate = Number(text);
+      if (!Number.isFinite(rate) || rate <= 0 || rate >= 1) return NaN;
+      return rate;
+    }
+
+    function compressStatusClass(data) {
+      if (data.running) return "running";
+      if (data.phase === "stopped") return "stopped";
+      if (data.phase === "error") return "error";
+      if (data.phase === "done") return "done";
+      return "";
+    }
+
+    function updateCompressButtons(running) {
+      document.getElementById("compress-btn").disabled = running;
+      document.getElementById("compress-stop-btn").classList.toggle("hidden", !running);
     }
 
     function setCompressStatus(data, cls = "") {
@@ -1076,7 +1136,11 @@
       wrap.classList.toggle("hidden", !show);
       if (!show) return;
       term.textContent = log || "Waiting for output…";
-      meta.textContent = data.running ? "live" : `exit ${data.exit_code ?? "—"}`;
+      meta.textContent = data.running
+        ? `live · ${data.log_lines ?? (log.split("\n").length - 1)} lines`
+        : data.phase === "stopped"
+          ? "stopped"
+          : `exit ${data.exit_code ?? "—"}`;
       if (data.running) {
         term.scrollTop = term.scrollHeight;
       }
@@ -1086,18 +1150,21 @@
       try {
         const res = await fetch("/api/compress-status");
         const data = await res.json();
-        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        const cls = compressStatusClass(data);
         setCompressStatus(data, cls);
         renderCompressTerminal(data);
+        updateCompressButtons(Boolean(data.running));
         if (data.running) {
-          compressPollTimer = setTimeout(pollCompressStatus, 800);
+          compressPollTimer = setTimeout(pollCompressStatus, 400);
           return;
         }
         compressPollTimer = null;
+        updateCompressButtons(false);
         document.getElementById("compress-btn").disabled = false;
         await loadVideos(videoSelect.value);
       } catch (err) {
         console.error(err);
+        updateCompressButtons(false);
         document.getElementById("compress-btn").disabled = false;
       }
     }
@@ -1107,11 +1174,11 @@
         const res = await fetch("/api/compress-status");
         const data = await res.json();
         if (!data.running && !(data.log || "").trim()) return;
-        const cls = data.running ? "running" : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        const cls = compressStatusClass(data);
         setCompressStatus(data, cls);
         renderCompressTerminal(data);
         if (data.running) {
-          document.getElementById("compress-btn").disabled = true;
+          updateCompressButtons(true);
           pollCompressStatus();
         }
       } catch (err) {
@@ -1129,16 +1196,34 @@
       const codec_mode = document.getElementById("codec-mode").value;
       const vmaf_threshold = Number(document.getElementById("vmaf-threshold").value);
       const target_bitrate = document.getElementById("target-bitrate").value.trim();
-      if (codec_mode === "vbr" && !target_bitrate) {
-        setCompressStatus({ message: "Target bitrate is required for vbr mode" }, "error");
-        return;
+      const target_compression_rate = parseCompressionRate(
+        document.getElementById("target-compression-rate").value
+      );
+      if (codec_mode === "vbr") {
+        if (Number.isNaN(target_compression_rate)) {
+          setCompressStatus({ message: "Target compression rate must be in (0, 1)" }, "error");
+          return;
+        }
+        if (!target_bitrate && target_compression_rate == null) {
+          setCompressStatus(
+            { message: "VBR needs target bitrate or target compression rate" },
+            "error"
+          );
+          return;
+        }
       }
       btn.disabled = true;
+      updateCompressButtons(true);
       setCompressStatus({ message: "Starting compression…" }, "running");
       renderCompressTerminal({ running: true, log: "", exit_code: null });
       try {
         const body = { codec_mode, vmaf_threshold, videos, encode_params: collectEncodeParams() };
-        if (codec_mode === "vbr") body.target_bitrate = target_bitrate;
+        if (codec_mode === "vbr") {
+          if (target_bitrate) body.target_bitrate = target_bitrate;
+          if (target_compression_rate != null) {
+            body.target_compression_rate = target_compression_rate;
+          }
+        }
         const res = await fetch("/api/compress", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1147,15 +1232,46 @@
         const data = await res.json();
         if (!res.ok) {
           setCompressStatus({ message: data.error || "Compression request failed" }, "error");
+          updateCompressButtons(false);
           btn.disabled = false;
           return;
         }
-        if (!data.started) {
-          setCompressStatus(data.status, "running");
+        if (!data.started && data.status) {
+          setCompressStatus(data.status, compressStatusClass(data.status));
         }
         pollCompressStatus();
       } catch (err) {
         setCompressStatus({ message: `Compression failed: ${err}` }, "error");
+        updateCompressButtons(false);
+        btn.disabled = false;
+      }
+    }
+
+    async function stopCompress() {
+      const btn = document.getElementById("compress-stop-btn");
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/compress-stop", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok) {
+          setCompressStatus(
+            { message: data.error || `Stop failed (${res.status})` },
+            "error"
+          );
+          return;
+        }
+        const status = data.status || data;
+        setCompressStatus(status, compressStatusClass(status));
+        renderCompressTerminal(status);
+        if (status.running) {
+          pollCompressStatus();
+        } else {
+          updateCompressButtons(false);
+          document.getElementById("compress-btn").disabled = false;
+        }
+      } catch (err) {
+        setCompressStatus({ message: `Stop failed: ${err}` }, "error");
+      } finally {
         btn.disabled = false;
       }
     }
@@ -1168,15 +1284,28 @@
       el.className = `analyze-status ${cls}`.trim();
     }
 
+    function collectAnalyzeFilters() {
+      return {
+        codec: document.getElementById("analyze-codec").value,
+        mode: document.getElementById("analyze-mode").value,
+        vmaf_threshold: document.getElementById("analyze-vmaf-threshold").value,
+        uids: document.getElementById("analyze-uids").value.trim(),
+        failures_only: document.getElementById("analyze-failures").checked,
+      };
+    }
+
     async function clearAnalyze() {
       if (analyzePollTimer) {
         clearTimeout(analyzePollTimer);
         analyzePollTimer = null;
       }
       document.getElementById("analyze-uids").value = "";
+      document.getElementById("analyze-mode").value = "all";
+      document.getElementById("analyze-vmaf-threshold").value = "all";
       document.getElementById("analyze-failures").checked = false;
       document.getElementById("analyze-results").innerHTML = "";
       document.getElementById("analyze-btn").disabled = false;
+      document.getElementById("analyze-search").disabled = false;
       try {
         await fetch("/api/analyze-clear", { method: "POST" });
       } catch (err) {
@@ -1193,7 +1322,11 @@
     function renderAnalyzeResults(data) {
       const root = document.getElementById("analyze-results");
       root.innerHTML = "";
-      const challenges = data.challenges || [];
+      const challenges = [...(data.challenges || [])].sort((a, b) => {
+        const aTop = Number(a.top_mean_final ?? (a.uids && a.uids[0] && a.uids[0].mean_final) ?? 0);
+        const bTop = Number(b.top_mean_final ?? (b.uids && b.uids[0] && b.uids[0].mean_final) ?? 0);
+        return bTop - aTop;
+      });
       if (!challenges.length) {
         root.innerHTML = '<div class="empty">No matching score lines</div>';
         return;
@@ -1201,8 +1334,11 @@
       for (const chal of challenges) {
         const block = document.createElement("div");
         block.className = "chal-block";
-        block.innerHTML = `<h3>${chal.codec} · ${chal.mode} · thr ${chal.vmaf_threshold} · ${chal.uids.length} UID(s)</h3>`;
-        for (const uid of chal.uids) {
+        const uids = [...(chal.uids || [])].sort(
+          (a, b) => Number(b.mean_final || 0) - Number(a.mean_final || 0)
+        );
+        block.innerHTML = `<h3>${chal.codec} · ${chal.mode} · thr ${chal.vmaf_threshold} · ${uids.length} UID(s) · sorted by mean_final</h3>`;
+        for (const uid of uids) {
           const uidEl = document.createElement("div");
           uidEl.className = "uid-block";
           const head = document.createElement("div");
@@ -1222,7 +1358,10 @@
             <th>bitrate</th><th>bpp</th><th>status</th>
           </tr></thead>`;
           const tbody = document.createElement("tbody");
-          (uid.rows || []).forEach((row, i) => {
+          const rows = [...(uid.rows || [])].sort(
+            (a, b) => Number(b.final || 0) - Number(a.final || 0)
+          );
+          rows.forEach((row, i) => {
             const tr = document.createElement("tr");
             const ok = row.success;
             const vid = row.video_id || (row.video_idx != null ? `#${row.video_idx}` : "—");
@@ -1260,6 +1399,7 @@
         }
         analyzePollTimer = null;
         document.getElementById("analyze-btn").disabled = false;
+        document.getElementById("analyze-search").disabled = false;
         if (data.phase === "error" && !data.result) {
           document.getElementById("analyze-results").innerHTML = "";
         }
@@ -1267,6 +1407,7 @@
         console.error(err);
         analyzePollTimer = null;
         document.getElementById("analyze-btn").disabled = false;
+        document.getElementById("analyze-search").disabled = false;
         setAnalyzeStatus(`Analyze failed: ${err}`, "error");
       }
     }
@@ -1283,6 +1424,7 @@
         if (data.result) renderAnalyzeResults(data.result);
         if (data.running) {
           document.getElementById("analyze-btn").disabled = true;
+          document.getElementById("analyze-search").disabled = true;
           pollAnalyzeStatus();
         }
       } catch (err) {
@@ -1292,15 +1434,12 @@
 
     async function runAnalyze() {
       const btn = document.getElementById("analyze-btn");
+      const searchBtn = document.getElementById("analyze-search");
       btn.disabled = true;
+      searchBtn.disabled = true;
       setAnalyzeStatus("Starting WandB fetch…", "running");
       document.getElementById("analyze-results").innerHTML = "";
-      const body = {
-        source: "wandb",
-        codec: document.getElementById("analyze-codec").value,
-        uids: document.getElementById("analyze-uids").value.trim(),
-        failures_only: document.getElementById("analyze-failures").checked,
-      };
+      const body = { source: "wandb", ...collectAnalyzeFilters() };
       try {
         const res = await fetch("/api/analyze-log", {
           method: "POST",
@@ -1311,6 +1450,7 @@
         if (!res.ok) {
           setAnalyzeStatus(data.error || "Analyze failed", "error");
           btn.disabled = false;
+          searchBtn.disabled = false;
           return;
         }
         if (data.status) {
@@ -1319,6 +1459,34 @@
         pollAnalyzeStatus();
       } catch (err) {
         setAnalyzeStatus(`Analyze failed: ${err}`, "error");
+        btn.disabled = false;
+        searchBtn.disabled = false;
+      }
+    }
+
+    async function runAnalyzeSearch() {
+      const btn = document.getElementById("analyze-search");
+      btn.disabled = true;
+      setAnalyzeStatus("Searching cached log…", "running");
+      try {
+        const res = await fetch("/api/analyze-search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(collectAnalyzeFilters()),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setAnalyzeStatus(data.error || "Search failed", "error");
+          document.getElementById("analyze-results").innerHTML = "";
+          return;
+        }
+        const status = data.status || {};
+        setAnalyzeStatus(status.message || "Done", status.phase === "error" ? "error" : "done");
+        if (status.result) renderAnalyzeResults(status.result);
+        else document.getElementById("analyze-results").innerHTML = "";
+      } catch (err) {
+        setAnalyzeStatus(`Search failed: ${err}`, "error");
+      } finally {
         btn.disabled = false;
       }
     }
@@ -1334,10 +1502,11 @@
     });
     document.getElementById("video-checklist").addEventListener("change", updateSelectedCount);
     document.getElementById("compress-btn").addEventListener("click", startCompress);
+    document.getElementById("compress-stop-btn").addEventListener("click", stopCompress);
     document.getElementById("analyze-btn").addEventListener("click", runAnalyze);
+    document.getElementById("analyze-search").addEventListener("click", runAnalyzeSearch);
     document.getElementById("analyze-clear").addEventListener("click", clearAnalyze);
     toggleTargetBitrateField();
-    renderX265DetailGrid();
     loadEncodeDefaults();
     bindSync();
     initFetchMonitor();

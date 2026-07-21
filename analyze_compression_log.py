@@ -311,18 +311,39 @@ def filter_scores(
     codec: Optional[str],
     include_failures: bool,
     uids: Optional[Iterable[int]] = None,
+    mode: Optional[str] = None,
+    vmaf_threshold: Optional[float] = None,
 ) -> list[ScoreRow]:
-    """Filter score rows by codec, failure status, and optional UID set."""
+    """Filter score rows by codec, mode, VMAF threshold, UID, and failure status."""
     uid_set: Optional[set[int]] = None
     if uids is not None:
         uid_set = {int(u) for u in uids}
         if not uid_set:
             uid_set = None
+    mode_norm = mode.upper().strip() if mode else None
+    if mode_norm in {"VBR", "ABR", "BITRATE"}:
+        mode_norm = "VBR"
+    elif mode_norm in {"CRF", "RC", "CQ"}:
+        mode_norm = "CRF"
+    thr_val: Optional[float] = None
+    if vmaf_threshold is not None:
+        thr_val = float(vmaf_threshold)
+
     out: list[ScoreRow] = []
     for s in scores:
         if uid_set is not None and s.uid not in uid_set:
             continue
         if codec and (s.codec or "").lower() != codec.lower():
+            continue
+        if mode_norm:
+            row_mode = (s.mode or "").upper()
+            if row_mode in {"ABR", "BITRATE"}:
+                row_mode = "VBR"
+            elif row_mode in {"RC", "CQ"}:
+                row_mode = "CRF"
+            if row_mode != mode_norm:
+                continue
+        if thr_val is not None and float(s.vmaf_threshold) != thr_val:
             continue
         if not include_failures and s.status in ("miner_failure", "missing_video"):
             if s.bitrate_mbps is None and s.vmaf is None:

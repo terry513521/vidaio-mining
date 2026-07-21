@@ -77,6 +77,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Re-run all jobs (same as --no-skip-published)",
     )
+    p.add_argument(
+        "--fleet-batch-size",
+        type=int,
+        default=0,
+        help="Override request fleet_batch_size (0 = use request JSON)",
+    )
+    p.add_argument(
+        "--vbr-mode-max-parallel",
+        type=int,
+        default=0,
+        help="Override VBR-mode parallel job cap (0 = use request / default 2)",
+    )
     return p.parse_args(argv)
 
 
@@ -85,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
     template = CompressionRequest.from_json(args.request)
     template.serial_cq_search = True
     template.max_workers = 1
+    if args.fleet_batch_size and args.fleet_batch_size > 0:
+        template.fleet_batch_size = int(args.fleet_batch_size)
+    if args.vbr_mode_max_parallel and args.vbr_mode_max_parallel > 0:
+        template.vbr_mode_max_parallel = int(args.vbr_mode_max_parallel)
     if args.local:
         template.skip_transfer = True
         template.download_reserve_sec = 0.0

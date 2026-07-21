@@ -387,6 +387,7 @@ class FleetSlaTests(unittest.TestCase):
                     "param_tune_max_trials": 3,
                     "param_tune_no_improve_stop": 10,
                     "param_tune_max_rounds": 1,
+                    "vbr_mode_tune": False,
                     "time_budget_sec": 0,
                     "final_encode_reserve_sec": 0,
                     "probe_min_budget_sec": 0,
@@ -465,6 +466,105 @@ class FleetSlaTests(unittest.TestCase):
             best = json.loads(best_path.read_text(encoding="utf-8"))
             self.assertEqual(best["bitrate"], "8M")
             self.assertEqual(best["target_bitrate"], "8M")
+
+    def test_vbr_mode_proxy_ladder_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "src.mp4"
+            src.write_bytes(b"local-input")
+            out = Path(td) / "out.mp4"
+            work = Path(td) / "work"
+            template = CompressionRequest.from_dict(
+                {
+                    "work_dir": str(work),
+                    "skip_transfer": True,
+                    "encoder": "libx265",
+                    "codec_mode": "ABR",
+                    "target_bitrate": "5M",
+                    "libx265_refine_preset": "superfast",
+                    "param_tune": True,
+                    "vbr_mode_tune": True,
+                    "vbr_mode_aq_min": 1.0,
+                    "vbr_mode_aq_max": 1.2,
+                    "vbr_mode_aq_step": 0.2,
+                    "vbr_mode_rd_sweep": [5, 6],
+                    "vbr_mode_bframes_sweep": [8, 12],
+                    "vbr_mode_lookahead_sweep": [50, 60],
+                    "preprocess_auto": False,
+                    "preprocess_ab": False,
+                    "preprocess": None,
+                    "time_budget_sec": 0,
+                    "final_encode_reserve_sec": 0,
+                    "probe_min_budget_sec": 0,
+                    "vmaf_threshold": 85,
+                    "jobs": [
+                        {
+                            "id": "vbrm",
+                            "input_path": str(src),
+                            "output_path": str(out),
+                        }
+                    ],
+                }
+            )
+            jobs = fleet_jobs_from_request(template)
+            encode_inputs: list[str] = []
+
+            def fake_extract(job, sample_frames, *, deadline):
+                _set_feature_scenes(job, duration=30.0, difficulty=0.4)
+
+            def fake_proxy(input_path, output_path, windows, **kwargs):
+                Path(output_path).write_bytes(b"proxy-ref")
+                return ProxyBuildResult(
+                    ok=True,
+                    path=str(output_path),
+                    windows=list(windows),
+                    total_seconds=2.0,
+                )
+
+            def fake_encode(input_path, output_path, **kwargs):
+                encode_inputs.append(str(input_path))
+                Path(output_path).write_bytes(b"vbr-encode")
+                return EncodeResult(True, output_path, 0, "", [])
+
+            score_n = {"n": 0}
+
+            def fake_score(*args, **kwargs):
+                score_n["n"] += 1
+                return _score(s_f=0.40 + 0.005 * score_n["n"], vmaf=88.0)
+
+            with patch("batch_search.download_to_path"), patch(
+                "batch_search.upload_presigned_put"
+            ), patch(
+                "batch_search._extract_sla_features", side_effect=fake_extract
+            ), patch(
+                "batch_search.build_proxy_reference", side_effect=fake_proxy
+            ), patch(
+                "batch_search.encode_hevc", side_effect=fake_encode
+            ), patch(
+                "batch_search.score_candidate", side_effect=fake_score
+            ), patch(
+                "batch_search.validate_hevc_output",
+                return_value=EncodeValidation(True, [], {}),
+            ), patch(
+                "batch_search._measured_bitrate_mbps", return_value=5.0
+            ), patch(
+                "batch_search.measure_compression", return_value=(0.1, 10.0)
+            ):
+                results = run_fleet_sla(template, jobs)
+
+            self.assertEqual(jobs[0].error, "", msg=jobs[0].error)
+            self.assertIsNotNone(results[0].best)
+            self.assertEqual(results[0].strategy, "fleet_sla_x265_vbr_mode")
+            # none + baseline already clears VMAF → stop without param ladder.
+            self.assertEqual(jobs[0].param_tune_trials, 1)
+            labels = [str(h.get("label") or "") for h in jobs[0].param_tune_history]
+            self.assertTrue(any(l.startswith("pp=") for l in labels))
+            self.assertFalse(any(l.startswith("aq=") for l in labels))
+            # Proxy search encodes use proxy path; final encode uses source.
+            self.assertTrue(any("vbr_mode_proxy" in p for p in encode_inputs))
+            self.assertTrue(any(str(src) == p for p in encode_inputs))
+            self.assertEqual(results[0].best.stage, "sla_final")
+            self.assertIsNotNone(jobs[0].best_params)
+            self.assertIn("aq-strength=", jobs[0].best_params or "")
 
     def test_abr_requires_target_bitrate_or_rate(self) -> None:
         with self.assertRaises(ValueError) as ctx:

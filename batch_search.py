@@ -8,6 +8,7 @@ rounds, estimate one x265 CRF per video and run final encodes in parallel waves.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -39,11 +40,17 @@ from interp_search import (
     round1_feature_cqs,
 )
 from logutil import log
-from param_tune import TuneTrialResult, run_param_tune_loop
+from param_tune import TuneTrialResult, get_param, run_param_tune_loop, set_param
 from crf_mode import (
     CrfModeTrial,
     merge_crf_mode_pack_into_recipe_params,
     run_crf_mode_phase_bc,
+)
+from vbr_mode import (
+    VbrModeTrial,
+    build_vbr_mode_params,
+    run_vbr_param_ladder,
+    run_vbr_preprocess_arms,
 )
 from proxy import build_proxy_reference, select_proxy_windows
 from recipes import (
@@ -116,6 +123,10 @@ class FleetVideoJob:
 def _fleet_sla_strategy(job: FleetVideoJob) -> str:
     hist = job.param_tune_history or []
     used_crf_mode = any(str(h.get("label", "")).startswith(("aq=", "la=")) for h in hist)
+    used_vbr_mode = any(
+        str(h.get("label", "")).startswith(("pp=", "aq=", "rd=", "bf=", "la="))
+        for h in hist
+    ) and any(str(h.get("label", "")).startswith("pp=") for h in hist)
     if job.vbr_fell_back_to_crf:
         if job.param_tune_trials > 0:
             return (
@@ -126,11 +137,51 @@ def _fleet_sla_strategy(job: FleetVideoJob) -> str:
         return "fleet_sla_x265_vbr_fallback_crf"
     if job.chosen_bitrate:
         if job.param_tune_trials > 0:
+            if used_vbr_mode:
+                return "fleet_sla_x265_vbr_mode"
             return "fleet_sla_x265_vbr_param_tune"
         return "fleet_sla_x265_fixed_vbr"
     if job.param_tune_trials > 0:
         return "fleet_sla_x265_crf_mode" if used_crf_mode else "fleet_sla_x265_crf_param_tune"
     return "fleet_sla_x265_full_crf"
+
+
+def _vbr_mode_vmaf_threads(req: CompressionRequest, fleet_n: int) -> int:
+    """Share VMAF threads across parallel fleet jobs; hard-cap to limit RAM."""
+    fleet_n = max(1, int(fleet_n))
+    raw = max(2, int(req.vmaf_n_threads) // fleet_n)
+    # Docker/libvmaf with high thread counts is a common OOM trigger.
+    return max(2, min(8, raw))
+
+
+def _vbr_mode_encode_params(params: str, *, fleet_n: int) -> str:
+    """Pin x265 pools/frame-threads when multiple fleet jobs encode at once."""
+    fleet_n = max(1, int(fleet_n))
+    if fleet_n <= 1:
+        return str(params)
+    # Keep existing explicit overrides if the request already set them.
+    out = str(params or "")
+    if get_param(out, "pools") is None:
+        out = set_param(out, "pools", 1)
+    if get_param(out, "frame-threads") is None:
+        cpus = os.cpu_count() or 8
+        ft = max(2, min(6, cpus // fleet_n))
+        out = set_param(out, "frame-threads", ft)
+    return out
+
+
+def _effective_fleet_workers(template: CompressionRequest, job_count: int) -> int:
+    """Fleet wave width, with an OOM cap for VBR-mode proxy search."""
+    workers = max(1, min(int(template.fleet_batch_size), max(1, int(job_count))))
+    if template.is_abr and bool(getattr(template, "vbr_mode_tune", True)):
+        cap = max(1, int(getattr(template, "vbr_mode_max_parallel", 2) or 2))
+        if workers > cap:
+            log(
+                f"  vbr-mode OOM guard: capping fleet workers {workers} → {cap} "
+                f"(set vbr_mode_max_parallel / fleet_batch_size to override)"
+            )
+            workers = cap
+    return workers
 
 
 def assign_fleet_gpu_slots(
@@ -1264,6 +1315,18 @@ def _run_fixed_bitrate_probe(
     job.probe_seed = 0
     job.probe_plan = []
 
+    if bool(getattr(req, "vbr_mode_tune", True)) and bool(req.param_tune):
+        _run_vbr_mode_search(
+            template,
+            job,
+            req=req,
+            recipe=recipe,
+            target_bitrate=target_bitrate,
+            target_mbps=target_mbps,
+            probe_deadline=probe_deadline,
+        )
+        return
+
     proposed, reason, candidates = resolve_vbr_preprocess(
         explicit=req.preprocess,
         preprocess_auto=bool(req.preprocess_auto),
@@ -1442,6 +1505,311 @@ def _run_fixed_bitrate_probe(
         probe_deadline=probe_deadline,
         min_attempt_sec=min_attempt_sec,
     )
+
+
+def _run_vbr_mode_search(
+    template: CompressionRequest,
+    job: FleetVideoJob,
+    *,
+    req: CompressionRequest,
+    recipe: HevcRecipe,
+    target_bitrate: str,
+    target_mbps: float,
+    probe_deadline: float,
+) -> None:
+    """Proxy (2s/scene) preprocess arms + aq→rd→bf→la ladder; full final later."""
+    work_dir = Path(job.work_dir)
+    preset = req.libx265_refine_preset or "fast"
+    fleet_n = max(1, int(template.fleet_batch_size))
+    if bool(getattr(req, "vbr_mode_tune", True)):
+        fleet_n = max(
+            1,
+            min(fleet_n, int(getattr(req, "vbr_mode_max_parallel", 2) or 2)),
+        )
+    vmaf_threads = _vbr_mode_vmaf_threads(req, fleet_n)
+    min_attempt_sec = min(120.0, max(45.0, float(template.probe_min_budget_sec) * 0.15))
+    safe_label = target_bitrate.replace("/", "_").replace(" ", "")
+
+    baseline_params, aq_mode, pack_reason = build_vbr_mode_params(job.features)
+    if req.libx265_params:
+        # Allow request override to seed baseline; still freeze pack keys via ladder.
+        baseline_params = str(req.libx265_params)
+    baseline_params = _vbr_mode_encode_params(baseline_params, fleet_n=fleet_n)
+    job.recipe = dc_replace(recipe, params=baseline_params)
+    job.best_params = baseline_params
+
+    proposed, reason, candidates = resolve_vbr_preprocess(
+        explicit=req.preprocess,
+        preprocess_auto=bool(req.preprocess_auto),
+        features=job.features,
+        preprocess_sweep=bool(req.preprocess_sweep),
+    )
+    unique_cands: list[Optional[str]] = []
+    for c in candidates:
+        if c not in unique_cands:
+            unique_cands.append(c)
+    if not bool(req.preprocess_ab or req.preprocess_sweep):
+        unique_cands = [proposed]
+
+    seconds_per = float(
+        getattr(req, "vbr_mode_proxy_seconds_per_scene", 2.0) or 2.0
+    )
+    windows = select_proxy_windows(
+        job.segments or [],
+        seconds_per_segment=seconds_per,
+        max_seconds=float(req.proxy_max_seconds),
+        min_window_seconds=float(req.proxy_min_window_seconds),
+    )
+    if not windows:
+        job.error = "vbr-mode: no proxy windows from scenes"
+        return
+
+    proxy_path = work_dir / "vbr_mode_proxy.mp4"
+    proxy_started = time.monotonic()
+    built = build_proxy_reference(
+        job.input_path,
+        str(proxy_path),
+        windows,
+        ffmpeg_bin=req.ffmpeg_bin,
+        timeout=timeout_from_deadline(probe_deadline),
+        deadline=probe_deadline,
+    )
+    job.stage_timings["proxy"] = time.monotonic() - proxy_started
+    if not built.ok:
+        job.error = f"vbr-mode proxy failed: {built.error}"
+        return
+    job.proxy_path = built.path
+    proxy_ref = built.path
+
+    cand_txt = ",".join(c or "none" for c in unique_cands)
+    log(
+        f"  [{job.job_id}] vbr-mode {target_bitrate}: proxy={seconds_per:g}s/scene "
+        f"windows={len(windows)} aq-mode={aq_mode} ({pack_reason}) "
+        f"preprocess_candidates=[{cand_txt}] ({reason})"
+    )
+    log(f"  [{job.job_id}] vbr-mode baseline x265-params={baseline_params}")
+
+    trial_counter = {"n": 0}
+    score_cache: dict[tuple[Optional[str], str], Any] = {}
+    path_cache: dict[tuple[Optional[str], str], str] = {}
+
+    def evaluate(preprocess: Optional[str], params: str) -> VbrModeTrial:
+        left = seconds_left(probe_deadline)
+        if left < min_attempt_sec:
+            return VbrModeTrial(
+                preprocess=preprocess,
+                aq_strength=0.0,
+                rd=0,
+                bframes=0,
+                rc_lookahead=0,
+                params=params,
+                reason="probe budget exhausted",
+            )
+        cache_key = (preprocess, str(params))
+        if cache_key in score_cache:
+            score = score_cache[cache_key]
+            return VbrModeTrial(
+                preprocess=preprocess,
+                aq_strength=0.0,
+                rd=0,
+                bframes=0,
+                rc_lookahead=0,
+                params=params,
+                ok=True,
+                s_f=float(score.s_f),
+                vmaf=float(score.vmaf),
+                compression_rate=float(score.compression_rate),
+                compression_ratio=float(score.compression_ratio),
+                path=path_cache[cache_key],
+                reason="cache",
+            )
+        trial_counter["n"] += 1
+        tag = preprocess or "none"
+        out = work_dir / f"vbrmode_t{trial_counter['n']}_{safe_label}_{tag}.mp4"
+        enc_params = _vbr_mode_encode_params(params, fleet_n=fleet_n)
+        enc = encode_hevc(
+            proxy_ref,
+            str(out),
+            preset=preset,
+            params=enc_params,
+            codec_mode="ABR",
+            crf=None,
+            bitrate=target_bitrate,
+            ffmpeg_bin=req.ffmpeg_bin,
+            timeout=timeout_from_deadline(probe_deadline),
+            encoder="libx265",
+            preprocess=preprocess,
+            libx265_profile=req.libx265_profile,
+            progress_reference_path=proxy_ref,
+            progress_label=(
+                f"[{job.job_id}] vbr-mode t{trial_counter['n']} "
+                f"{target_bitrate} pp={tag}"
+            ),
+            progress_interval_sec=10.0,
+        )
+        if not enc.ok:
+            return VbrModeTrial(
+                preprocess=preprocess,
+                aq_strength=0.0,
+                rd=0,
+                bframes=0,
+                rc_lookahead=0,
+                params=params,
+                reason=enc.stderr_tail or "encode failed",
+            )
+        score = score_candidate(
+            proxy_ref,
+            str(out),
+            req.vmaf_threshold,
+            ffmpeg_bin=req.ffmpeg_bin,
+            ffprobe_bin=req.ffprobe_bin,
+            vmaf_n_subsample=req.vmaf_n_subsample,
+            vmaf_n_threads=vmaf_threads,
+            vmaf_backend=req.vmaf_backend,
+            vmaf_docker_image=req.vmaf_docker_image,
+            **_job_vmaf_gpu_kwargs(job, req),
+            codec_mode="ABR",
+            target_bitrate_mbps=target_mbps,
+            timeout=timeout_from_deadline(probe_deadline),
+        )
+        # Usable for search even when still below VMAF threshold / delta gate:
+        # keep climbing preprocess + param ladder until vmaf clears.
+        usable = (
+            float(score.vmaf) > 0
+            and float(score.s_f) > 0
+            and bool(score.passed_encoding_gates)
+        )
+        if not usable:
+            return VbrModeTrial(
+                preprocess=preprocess,
+                aq_strength=0.0,
+                rd=0,
+                bframes=0,
+                rc_lookahead=0,
+                params=params,
+                ok=False,
+                s_f=float(score.s_f or 0.0),
+                vmaf=float(score.vmaf or 0.0),
+                compression_rate=float(score.compression_rate or 1.0),
+                compression_ratio=float(score.compression_ratio or 1.0),
+                path=str(out),
+                reason=score.reason or "score gates failed",
+            )
+        path_cache[cache_key] = str(out.resolve())
+        score_cache[cache_key] = score
+        log(
+            f"  [{job.job_id}] vbr-mode t{trial_counter['n']}: pp={tag} "
+            f"s_f={score.s_f:.4f} vmaf={score.vmaf:.2f} rate={score.compression_rate:.4f}"
+            + (
+                ""
+                if float(score.vmaf) > float(req.vmaf_threshold)
+                else f" (below thr {req.vmaf_threshold:g})"
+            )
+        )
+        return VbrModeTrial(
+            preprocess=preprocess,
+            aq_strength=0.0,
+            rd=0,
+            bframes=0,
+            rc_lookahead=0,
+            params=params,
+            ok=True,
+            s_f=float(score.s_f),
+            vmaf=float(score.vmaf),
+            compression_rate=float(score.compression_rate),
+            compression_ratio=float(score.compression_ratio),
+            path=path_cache[cache_key],
+            reason="ok",
+        )
+
+    search_started = time.monotonic()
+    pp_state = run_vbr_preprocess_arms(
+        candidates=unique_cands,
+        baseline_params=baseline_params,
+        evaluate=evaluate,
+        vmaf_threshold=float(req.vmaf_threshold),
+        job_id=job.job_id,
+    )
+    if pp_state.s_f <= 0 or not pp_state.path:
+        job.error = (
+            f"vbr-mode preprocess search failed: {pp_state.preprocess_reason}"
+        )
+        job.stage_timings["crf_search"] = time.monotonic() - search_started
+        job.param_tune_trials = int(pp_state.trials)
+        job.param_tune_history = list(pp_state.history)
+        return
+
+    job.chosen_preprocess = pp_state.preprocess
+    job.preprocess_reason = pp_state.preprocess_reason
+    req.preprocess = pp_state.preprocess
+
+    # If preprocess already cleared VMAF, ladder returns immediately and we
+    # keep that best state. Otherwise climb aq→rd→bf→la until clear or exhausted.
+    ladder_state = run_vbr_param_ladder(
+        preprocess=pp_state.preprocess,
+        initial_params=pp_state.params,
+        initial_s_f=float(pp_state.s_f),
+        initial_vmaf=float(pp_state.vmaf),
+        initial_path=str(pp_state.path),
+        initial_compression_rate=float(pp_state.compression_rate),
+        initial_compression_ratio=float(pp_state.compression_ratio),
+        evaluate=evaluate,
+        vmaf_threshold=float(req.vmaf_threshold),
+        aq_min=float(req.vbr_mode_aq_min),
+        aq_max=float(req.vbr_mode_aq_max),
+        aq_step=float(req.vbr_mode_aq_step),
+        rd_sweep=tuple(req.vbr_mode_rd_sweep),
+        bframes_sweep=tuple(req.vbr_mode_bframes_sweep),
+        lookahead_sweep=tuple(req.vbr_mode_lookahead_sweep),
+        job_id=job.job_id,
+    )
+
+    # Merge history (preprocess arms + ladder); ladder.trials are additional.
+    history = list(pp_state.history) + list(ladder_state.history)
+    for index, item in enumerate(history, start=1):
+        item["trial"] = index
+
+    job.stage_timings["crf_search"] = time.monotonic() - search_started
+    job.stage_timings["param_tune"] = time.monotonic() - search_started
+    job.param_tune_trials = len(history)
+    job.param_tune_history = history
+    job.best_params = ladder_state.params
+    job.recipe = dc_replace(job.recipe, params=ladder_state.params)
+    job.chosen_bitrate = target_bitrate
+
+    best_key = (ladder_state.preprocess, str(ladder_state.params))
+    best_score = score_cache.get(best_key)
+    best_path = path_cache.get(best_key, ladder_state.path)
+    if best_score is None:
+        job.error = "vbr-mode: missing best proxy score"
+        return
+
+    job.probe_best = TrialResult(
+        recipe=job.recipe.name,
+        mode="ABR",
+        crf=None,
+        bitrate=target_bitrate,
+        path=best_path,
+        score=best_score,
+        encode_ok=True,
+        stage="sla_vbr_proxy",
+        encoder="libx265",
+        encode_sec=job.stage_timings.get("crf_search", 0.0),
+        score_sec=0.0,
+        elapsed_sec=job.stage_timings.get("crf_search", 0.0),
+    )
+    job.nvenc_best = job.probe_best
+    log(
+        f"  [{job.job_id}] vbr-mode done: trials={job.param_tune_trials} "
+        f"preprocess={job.chosen_preprocess or 'none'} "
+        f"s_f={ladder_state.s_f:.4f} vmaf={ladder_state.vmaf:.2f}"
+        + (
+            f" early_stop={ladder_state.stop_reason or pp_state.stop_reason}"
+            if (ladder_state.stopped_early or pp_state.stopped_early)
+            else ""
+        )
+    )
+    log(f"  [{job.job_id}] best x265-params={ladder_state.params}")
 
 
 def _run_param_tune_after_crf(
@@ -2547,6 +2915,9 @@ def _finalize_and_upload_sla_job(
 
     req = _job_request(template, job)
     req.encoder = "libx265"
+    # Prefer per-job preprocess winner (VBR mode / preprocess A/B).
+    if job.chosen_preprocess is not None or job.preprocess_reason:
+        req.preprocess = job.chosen_preprocess
     params_override = job.best_params if job.best_params is not None else req.libx265_params
     x265_recipe = select_recipes(
         job.features,
@@ -2565,7 +2936,9 @@ def _finalize_and_upload_sla_job(
     if job.chosen_bitrate:
         bitrate = job.chosen_bitrate
         reason = (
-            "vbr_param_tune" if job.param_tune_trials > 0 else "fixed_vbr"
+            "vbr_mode"
+            if any(str(h.get("label", "")).startswith("pp=") for h in (job.param_tune_history or []))
+            else ("vbr_param_tune" if job.param_tune_trials > 0 else "fixed_vbr")
         )
         log(f"  [{job.job_id}] final libx265 VBR {bitrate} ({reason})")
     elif job.chosen_crf is not None:
@@ -2600,11 +2973,14 @@ def _finalize_and_upload_sla_job(
         log(f"  [{job.job_id}] final libx265 CRF {crf} ({reason})")
 
     # Reuse the full-file probe encode when it already has evaluation dual-VMAF.
+    # Never reuse proxy-search outputs (sla_proxy_probe / sla_vbr_proxy).
     probe = job.probe_best
+    proxy_stages = {"sla_proxy_probe", "sla_vbr_proxy"}
     if bitrate is not None:
         can_reuse_probe = (
             probe is not None
             and probe.encode_ok
+            and str(probe.stage or "") not in proxy_stages
             and str(probe.bitrate or "") == str(bitrate)
             and probe.score.vmaf_base is not None
             and probe.score.passed_vmaf_delta_gate
@@ -2614,6 +2990,7 @@ def _finalize_and_upload_sla_job(
         can_reuse_probe = (
             probe is not None
             and probe.encode_ok
+            and str(probe.stage or "") not in proxy_stages
             and probe.crf == crf
             and probe.score.vmaf_base is not None
             and probe.score.passed_vmaf_delta_gate
@@ -2791,7 +3168,7 @@ def run_fleet_sla(
     template.final_encode_reserve_sec = final_reserve
     template.probe_min_budget_sec = probe_min
 
-    workers = max(1, min(template.fleet_batch_size, len(jobs)))
+    workers = _effective_fleet_workers(template, len(jobs))
     mode = "local" if template.skip_transfer else "http"
     wave_count = (len(jobs) + workers - 1) // workers
     budget_txt = "unlimited" if unlimited else f"{template.time_budget_sec:.0f}s"

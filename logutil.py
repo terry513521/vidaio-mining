@@ -15,6 +15,7 @@ def log(msg: str = "", *args: Any, **kwargs: Any) -> None:
     if args:
         msg = msg % args if "%" in msg else " ".join((msg, *(str(a) for a in args)))
     line = f"[{ts()}] {msg}"
+    kwargs.setdefault("flush", True)
     try:
         print(line, **kwargs)
     except UnicodeEncodeError:

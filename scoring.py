@@ -500,118 +500,110 @@ def _wait_for_docker(timeout_sec: float = 120.0) -> bool:
     return False
 
 
-def _compute_vmaf_docker(
+def _docker_vmaf_attempt(
     reference_path: str,
     distorted_path: str,
     *,
     docker_image: str,
-    use_gpus: bool,
+    attempt_gpu: bool,
     n_subsample: int,
     n_threads: int,
     model: str,
     model_path: Optional[str] = None,
     timeout: Optional[float] = None,
     gpu_device: Optional[int] = None,
-) -> float:
-    """Run VMAF inside a Docker image that provides ffmpeg+libvmaf.
-
-    Uses ``--entrypoint ffmpeg`` so both validator images (ENTRYPOINT ffmpeg)
-    and local eval images (python entrypoint) work.
-  When GPU Docker init fails (driver mismatch, etc.), retries once with CPU libvmaf.
-    """
+    gpu_lock_mode: str = "none",
+) -> tuple[Optional[float], str, bool]:
+    """Run one docker VMAF attempt. Returns (score, stderr, wants_cpu_fallback)."""
     dist_path = os.path.abspath(distorted_path)
     ref_path = os.path.abspath(reference_path)
     dist_dir = os.path.dirname(dist_path)
     ref_dir = os.path.dirname(ref_path)
     model_opt, mount_model = _libvmaf_model_option(model, model_path)
 
-    gpu_attempts = [True, False] if use_gpus else [False]
-    last_stderr = ""
+    with tempfile.TemporaryDirectory(prefix="vmaf_docker_") as tmp:
+        log_path = os.path.join(tmp, "vmaf.json")
+        volumes = {dist_dir, ref_dir, tmp}
+        if mount_model:
+            volumes.add(os.path.dirname(mount_model))
+        vol_args: list[str] = []
+        for vol in sorted(volumes):
+            vol_args.extend(["-v", f"{vol}:{vol}"])
 
-    for attempt_gpu in gpu_attempts:
-        with tempfile.TemporaryDirectory(prefix="vmaf_docker_") as tmp:
-            log_path = os.path.join(tmp, "vmaf.json")
-            volumes = {dist_dir, ref_dir, tmp}
-            if mount_model:
-                volumes.add(os.path.dirname(mount_model))
-            vol_args: list[str] = []
-            for vol in sorted(volumes):
-                vol_args.extend(["-v", f"{vol}:{vol}"])
-
-            if attempt_gpu:
-                filter_graph = (
-                    f"[0:v]format=yuv420p,hwupload_cuda[dis];"
-                    f"[1:v]format=yuv420p,hwupload_cuda[ref];"
-                    f"[dis][ref]libvmaf_cuda="
-                    f"n_subsample={n_subsample}:"
-                    f"model='{model_opt}':"
-                    f"log_fmt=json:"
-                    f"log_path={log_path}"
-                )
-            else:
-                filter_graph = (
-                    f"[0:v]setpts=PTS-STARTPTS,setsar=1[main];"
-                    f"[1:v]setpts=PTS-STARTPTS,setsar=1[ref];"
-                    f"[main][ref]libvmaf="
-                    f"model={model_opt}:"
-                    f"log_fmt=json:"
-                    f"log_path={log_path}:"
-                    f"pool=harmonic_mean:"
-                    f"n_threads={n_threads}:"
-                    f"n_subsample={n_subsample}"
-                )
-
-            # Force ffmpeg entrypoint: validator image uses ENTRYPOINT ["ffmpeg"],
-            # while some eval images may default to python.
-            cmd = ["docker", "run", "--rm", "--entrypoint", "ffmpeg"]
-            if attempt_gpu:
-                # Pin to one GPU when requested so two fleet jobs can score in parallel.
-                gpu_spec = (
-                    f"device={int(gpu_device)}"
-                    if gpu_device is not None
-                    else "all"
-                )
-                cmd.extend(
-                    [
-                        "--gpus",
-                        gpu_spec,
-                        "-e",
-                        "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility",
-                    ]
-                )
-            cmd.extend(vol_args)
-            cmd.extend(
-                [
-                    docker_image,
-                    "-hide_banner",
-                    "-i",
-                    dist_path,
-                    "-i",
-                    ref_path,
-                    "-lavfi",
-                    filter_graph,
-                    "-f",
-                    "null",
-                    "-",
-                ]
+        if attempt_gpu:
+            filter_graph = (
+                f"[0:v]format=yuv420p,hwupload_cuda[dis];"
+                f"[1:v]format=yuv420p,hwupload_cuda[ref];"
+                f"[dis][ref]libvmaf_cuda="
+                f"n_subsample={n_subsample}:"
+                f"model='{model_opt}':"
+                f"log_fmt=json:"
+                f"log_path={log_path}"
+            )
+        else:
+            filter_graph = (
+                f"[0:v]setpts=PTS-STARTPTS,setsar=1[main];"
+                f"[1:v]setpts=PTS-STARTPTS,setsar=1[ref];"
+                f"[main][ref]libvmaf="
+                f"model={model_opt}:"
+                f"log_fmt=json:"
+                f"log_path={log_path}:"
+                f"pool=harmonic_mean:"
+                f"n_threads={n_threads}:"
+                f"n_subsample={n_subsample}"
             )
 
-            max_docker_tries = 4
-            result = None
+        cmd = ["docker", "run", "--rm", "--entrypoint", "ffmpeg"]
+        if attempt_gpu:
+            gpu_spec = (
+                f"device={int(gpu_device)}"
+                if gpu_device is not None
+                else "all"
+            )
+            cmd.extend(
+                [
+                    "--gpus",
+                    gpu_spec,
+                    "-e",
+                    "NVIDIA_DRIVER_CAPABILITIES=compute,video,utility",
+                ]
+            )
+        cmd.extend(vol_args)
+        cmd.extend(
+            [
+                docker_image,
+                "-hide_banner",
+                "-i",
+                dist_path,
+                "-i",
+                ref_path,
+                "-lavfi",
+                filter_graph,
+                "-f",
+                "null",
+                "-",
+            ]
+        )
+
+        gpu_lock = None
+        acquired = False
+        if attempt_gpu and gpu_lock_mode in {"blocking", "held"}:
+            gpu_lock = _gpu_device_lock(gpu_device)
+            if gpu_lock_mode == "blocking":
+                gpu_lock.acquire()
+                acquired = True
+
+        max_docker_tries = 4
+        result = None
+        last_stderr = ""
+        try:
             for docker_try in range(1, max_docker_tries + 1):
-                gpu_lock = _gpu_device_lock(gpu_device) if attempt_gpu else None
-                if gpu_lock is not None:
-                    gpu_lock.acquire()
-                try:
-                    result = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=timeout
-                    )
-                finally:
-                    if gpu_lock is not None:
-                        gpu_lock.release()
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=timeout
+                )
                 last_stderr = (result.stderr or "") + (result.stdout or "")
                 if result.returncode == 0 and os.path.isfile(log_path):
-                    return _parse_vmaf_json(log_path)
+                    return _parse_vmaf_json(log_path), last_stderr, False
 
                 if _stderr_has_marker(last_stderr, _DOCKER_TRANSIENT_MARKERS):
                     if docker_try < max_docker_tries:
@@ -629,7 +621,7 @@ def _compute_vmaf_docker(
                     attempt_gpu
                     and _stderr_has_marker(last_stderr, _GPU_DOCKER_FALLBACK_MARKERS)
                 ):
-                    break
+                    return None, last_stderr, True
 
                 raise RuntimeError(
                     "VMAF computation failed (docker):\n"
@@ -638,21 +630,128 @@ def _compute_vmaf_docker(
                     "  --vmaf-docker-image vmaf_ffmpeg\n"
                     "and ensure NEG model exists at vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json"
                 )
+        finally:
+            if gpu_lock is not None and acquired:
+                gpu_lock.release()
 
-            if (
-                attempt_gpu
-                and result is not None
-                and _stderr_has_marker(last_stderr, _GPU_DOCKER_FALLBACK_MARKERS)
-            ):
-                continue
+        if (
+            attempt_gpu
+            and result is not None
+            and _stderr_has_marker(last_stderr, _GPU_DOCKER_FALLBACK_MARKERS)
+        ):
+            return None, last_stderr, True
 
-            raise RuntimeError(
-                "VMAF computation failed (docker):\n"
-                + (last_stderr[-2000:] if last_stderr else "no stderr")
-                + "\nHint: use an image with libvmaf, e.g.\n"
-                "  --vmaf-docker-image vmaf_ffmpeg\n"
-                "and ensure NEG model exists at vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json"
+        raise RuntimeError(
+            "VMAF computation failed (docker):\n"
+            + (last_stderr[-2000:] if last_stderr else "no stderr")
+            + "\nHint: use an image with libvmaf, e.g.\n"
+            "  --vmaf-docker-image vmaf_ffmpeg\n"
+            "and ensure NEG model exists at vidaio-subnet/vmaf/model/vmaf_v0.6.1neg.json"
+        )
+
+
+def _compute_vmaf_docker(
+    reference_path: str,
+    distorted_path: str,
+    *,
+    docker_image: str,
+    use_gpus: bool,
+    n_subsample: int,
+    n_threads: int,
+    model: str,
+    model_path: Optional[str] = None,
+    timeout: Optional[float] = None,
+    gpu_device: Optional[int] = None,
+    gpu_prefer: bool = False,
+) -> float:
+    """Run VMAF inside a Docker image that provides ffmpeg+libvmaf.
+
+    Uses ``--entrypoint ffmpeg`` so both validator images (ENTRYPOINT ffmpeg)
+    and local eval images (python entrypoint) work.
+
+    When ``gpu_prefer=True``, take the GPU only if it is free (non-blocking
+    lock); otherwise score on CPU so parallel workers are not stalled.
+
+    When ``use_gpus=True`` without ``gpu_prefer``, keep the prior behavior:
+    block on the GPU lock, then fall back to CPU only on GPU driver errors.
+    """
+    if use_gpus and gpu_prefer:
+        dev = 0 if gpu_device is None else int(gpu_device)
+        lock = _gpu_device_lock(gpu_device)
+        if lock.acquire(blocking=False):
+            try:
+                score, stderr, wants_cpu = _docker_vmaf_attempt(
+                    reference_path,
+                    distorted_path,
+                    docker_image=docker_image,
+                    attempt_gpu=True,
+                    n_subsample=n_subsample,
+                    n_threads=n_threads,
+                    model=model,
+                    model_path=model_path,
+                    timeout=timeout,
+                    gpu_device=gpu_device,
+                    gpu_lock_mode="held",
+                )
+                if score is not None:
+                    return score
+                if wants_cpu:
+                    print(
+                        f"[vmaf] GPU device {dev} unavailable; using CPU libvmaf",
+                        flush=True,
+                    )
+            finally:
+                lock.release()
+        else:
+            print(
+                f"[vmaf] GPU device {dev} busy; using CPU libvmaf",
+                flush=True,
             )
+        score, _, _ = _docker_vmaf_attempt(
+            reference_path,
+            distorted_path,
+            docker_image=docker_image,
+            attempt_gpu=False,
+            n_subsample=n_subsample,
+            n_threads=n_threads,
+            model=model,
+            model_path=model_path,
+            timeout=timeout,
+            gpu_device=gpu_device,
+            gpu_lock_mode="none",
+        )
+        if score is None:
+            raise RuntimeError("VMAF computation failed (docker CPU fallback)")
+        return score
+
+    gpu_attempts = [True, False] if use_gpus else [False]
+    last_stderr = ""
+
+    for attempt_gpu in gpu_attempts:
+        try:
+            score, last_stderr, wants_cpu = _docker_vmaf_attempt(
+                reference_path,
+                distorted_path,
+                docker_image=docker_image,
+                attempt_gpu=attempt_gpu,
+                n_subsample=n_subsample,
+                n_threads=n_threads,
+                model=model,
+                model_path=model_path,
+                timeout=timeout,
+                gpu_device=gpu_device,
+                gpu_lock_mode="blocking" if attempt_gpu else "none",
+            )
+            if score is not None:
+                return score
+            if attempt_gpu and wants_cpu:
+                continue
+        except RuntimeError:
+            if attempt_gpu and gpu_attempts[-1] is False:
+                raise
+            if not attempt_gpu:
+                raise
+            continue
 
     raise RuntimeError(
         "VMAF computation failed (docker):\n"
@@ -672,6 +771,7 @@ def compute_vmaf(
     vmaf_docker_image: str = "vmaf_ffmpeg",
     vmaf_docker_gpus: bool = False,
     vmaf_gpu_device: Optional[int] = None,
+    vmaf_gpu_prefer: bool = False,
     timeout: Optional[float] = None,
 ) -> float:
     backend = (vmaf_backend or "docker").lower().strip()
@@ -696,6 +796,7 @@ def compute_vmaf(
             model=model,
             timeout=timeout,
             gpu_device=vmaf_gpu_device,
+            gpu_prefer=bool(vmaf_gpu_prefer),
         )
     raise ValueError(f"Unknown vmaf_backend: {vmaf_backend!r}")
 
@@ -733,6 +834,7 @@ def score_candidate(
     vmaf_docker_image: str = "vmaf_ffmpeg",
     vmaf_docker_gpus: bool = False,
     vmaf_gpu_device: Optional[int] = None,
+    vmaf_gpu_prefer: bool = False,
     compression_rate_override: Optional[float] = None,
     codec_mode: str = "RC",
     target_bitrate_mbps: Optional[float] = None,
@@ -800,6 +902,7 @@ def score_candidate(
             vmaf_docker_image=vmaf_docker_image,
             vmaf_docker_gpus=vmaf_docker_gpus,
             vmaf_gpu_device=vmaf_gpu_device,
+            vmaf_gpu_prefer=vmaf_gpu_prefer,
             model=NEG_MODEL,
             timeout=remaining(),
         )
@@ -834,6 +937,7 @@ def score_candidate(
             vmaf_docker_image=vmaf_docker_image,
             vmaf_docker_gpus=vmaf_docker_gpus,
             vmaf_gpu_device=vmaf_gpu_device,
+            vmaf_gpu_prefer=vmaf_gpu_prefer,
             model=BASE_MODEL,
             timeout=remaining(),
         )
