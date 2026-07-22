@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import asdict
@@ -28,11 +29,26 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT.parent
 STATIC = Path(__file__).resolve().parent / "static"
 RAW_VIDEO_DIR = Path(os.environ.get("RAW_VIDEO_DIR", WORKSPACE / "raw videos"))
+SEGMENTED_DIR = Path(os.environ.get("SEGMENTED_DIR", WORKSPACE / "segmented videos"))
+FEATURES_DIR = Path(os.environ.get("FEATURES_DIR", ROOT / "video_features"))
 # Legacy fallbacks (older downloads / numbered test clips).
 COMPRESSION_DIR = ROOT / "s3_videos" / "compression"
 VIDEO_DIR = WORKSPACE / "video"
 REQUEST_JSON = ROOT / "request.json"
 BATCH_RESULTS = ROOT / "work_fleet" / "batch_results.json"
+THUMB_DIR = Path(
+    os.environ.get("DASHBOARD_THUMB_DIR", ROOT / "work" / "dashboard_thumbs")
+)
+SEGMENT_GRID_ROOTS = [
+    Path(p.strip())
+    for p in os.environ.get(
+        "SEGMENT_GRID_DIRS",
+        f"{ROOT / 'work' / 'segment_crf_aq_grid'}:{ROOT / 'work' / 'segment_crf_aq_adaptive'}:{ROOT / 'work' / 'crf_aq_segment_sweep'}",
+    ).split(":")
+    if p.strip()
+]
+_thumb_lock = threading.Lock()
+_thumb_inflight: dict[str, threading.Event] = {}
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -782,6 +798,7 @@ def _catalog_entry(
         ),
         "request_params": _request_params_for_job(job, shared_request) if job else shared_request,
         "encode_params": _encode_params_from_result(batch),
+        "thumb_url": f"/media/thumb/{name}",
     }
 
 
@@ -899,65 +916,9 @@ def build_catalog() -> list[dict[str, Any]]:
     return entries
 
 
-def _gpu_stats() -> list[dict[str, Any]]:
-    try:
-        proc = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=3,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
-
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return []
-
-    gpus: list[dict[str, Any]] = []
-    for line in proc.stdout.strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 6:
-            continue
-        try:
-            mem_used = float(parts[3])
-            mem_total = float(parts[4])
-            mem_pct = (mem_used / mem_total * 100) if mem_total else 0
-        except ValueError:
-            mem_used = mem_total = mem_pct = None
-        gpus.append(
-            {
-                "index": parts[0],
-                "name": parts[1],
-                "utilization_pct": _safe_float(parts[2]),
-                "memory_used_mb": mem_used,
-                "memory_total_mb": mem_total,
-                "memory_pct": mem_pct,
-                "temperature_c": _safe_float(parts[5]),
-                "power_w": _safe_float(parts[6]) if len(parts) > 6 else None,
-            }
-        )
-    return gpus
-
-
-def _safe_float(value: str | None) -> float | None:
-    if value is None:
-        return None
-    value = value.strip()
-    if not value or value.upper() in {"N/A", "[N/A]"}:
-        return None
-    try:
-        return float(value)
-    except ValueError:
-        return None
-
-
 def system_stats() -> dict[str, Any]:
-    cpu_pct = psutil.cpu_percent(interval=0.1)
+    # Non-blocking CPU sample (avoids sleeping on every /api/system poll).
+    cpu_pct = psutil.cpu_percent(interval=None)
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage(str(ROOT))
     load1 = load5 = load15 = None
@@ -987,7 +948,6 @@ def system_stats() -> dict[str, Any]:
             "used_human": _fmt_bytes(disk.used),
             "free_human": _fmt_bytes(disk.free),
         },
-        "gpus": _gpu_stats(),
     }
 
 
@@ -1005,6 +965,1334 @@ def _find_raw_video(name: str) -> Path | None:
         if found is not None:
             return found
     return None
+
+
+def _thumb_cache_path(name: str) -> Path:
+    stem = Path(Path(unquote(name)).name).stem
+    # Keep filesystem-safe names for UUID stems etc.
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem)[:180] or "thumb"
+    return THUMB_DIR / f"{safe}.jpg"
+
+
+def ensure_video_thumbnail(name: str, *, width: int = 320) -> Path | None:
+    """Extract / cache the first frame of a source video as a JPEG poster."""
+    video = _find_raw_video(name)
+    if video is None:
+        return None
+
+    out = _thumb_cache_path(name)
+    try:
+        if out.is_file() and out.stat().st_mtime >= video.stat().st_mtime and out.stat().st_size > 0:
+            return out
+    except OSError:
+        pass
+
+    key = str(out)
+    with _thumb_lock:
+        wait_event = _thumb_inflight.get(key)
+        if wait_event is None:
+            wait_event = threading.Event()
+            _thumb_inflight[key] = wait_event
+            creator = True
+        else:
+            creator = False
+
+    if not creator:
+        wait_event.wait(timeout=60.0)
+        return out if out.is_file() and out.stat().st_size > 0 else None
+
+    try:
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.stem + ".part.jpg")
+        # Seek before -i for speed; scale down for sidebar posters.
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            "0",
+            "-i",
+            str(video),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={max(64, int(width))}:-2",
+            "-q:v",
+            "3",
+            str(tmp),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0 or not tmp.is_file() or tmp.stat().st_size <= 0:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            return None
+        tmp.replace(out)
+        return out
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    finally:
+        with _thumb_lock:
+            event = _thumb_inflight.pop(key, None)
+            if event is not None:
+                event.set()
+
+
+def _safe_grid_stem(raw: str) -> str | None:
+    text = unquote(str(raw or "")).strip()
+    if not text:
+        return None
+    stem = Path(text).name
+    if stem.endswith(".mp4"):
+        stem = stem[:-4]
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,200}", stem):
+        return None
+    return stem
+
+
+def _segment_grid_video_dirs() -> list[tuple[Path, str, Path]]:
+    """Return (root, stem, video_dir) for dirs that contain segment_*/trials.jsonl."""
+    out: list[tuple[Path, str, Path]] = []
+    seen: set[str] = set()
+    for root in SEGMENT_GRID_ROOTS:
+        if not root.is_dir():
+            continue
+        # Flat layout: root/segment_XX/trials.jsonl (single-video legacy)
+        flat_segs = sorted(root.glob("segment_*/trials.jsonl"))
+        if flat_segs:
+            stem = root.name
+            key = f"{root}:{stem}"
+            if key not in seen:
+                seen.add(key)
+                out.append((root, stem, root))
+            continue
+        # Nested: root/<stem>/segment_XX/trials.jsonl
+        for video_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+            if not any(video_dir.glob("segment_*/trials.jsonl")):
+                continue
+            stem = video_dir.name
+            key = f"{root}:{stem}"
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((root, stem, video_dir))
+    out.sort(key=lambda item: (item[1].lower(), item[0].name.lower()))
+    return out
+
+
+def _load_segment_trials(video_dir: Path, segment_index: int) -> list[dict[str, Any]]:
+    path = video_dir / f"segment_{int(segment_index):02d}" / "trials.jsonl"
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _trial_dedup_key(row: dict[str, Any]) -> tuple[int, float] | None:
+    try:
+        return (
+            int(float(row.get("crf") or 0)),
+            round(float(row.get("aq_strength") or 0), 4),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _merged_segment_indices(stem: str) -> list[int]:
+    indices: set[int] = set()
+    for root in SEGMENT_GRID_ROOTS:
+        video_dir = root / stem
+        if not video_dir.is_dir():
+            continue
+        for trials_path in video_dir.glob("segment_*/trials.jsonl"):
+            m = re.fullmatch(r"segment_(\d+)", trials_path.parent.name)
+            if m:
+                indices.add(int(m.group(1)))
+    return sorted(indices)
+
+
+def _load_merged_segment_trials(
+    stem: str,
+    segment_index: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Union trials from grid + adaptive (+ other roots); later roots win on (crf, aq)."""
+    by_key: dict[tuple[int, float], dict[str, Any]] = {}
+    sources: list[str] = []
+    for root in SEGMENT_GRID_ROOTS:
+        if not root.is_dir():
+            continue
+        rows = _load_segment_trials(root / stem, segment_index)
+        if not rows:
+            continue
+        sources.append(root.name)
+        for row in rows:
+            key = _trial_dedup_key(row)
+            if key is None:
+                continue
+            by_key[key] = row
+    merged = list(by_key.values())
+    merged.sort(key=lambda r: (int(float(r.get("crf") or 0)), float(r.get("aq_strength") or 0)))
+    return merged, sources
+
+
+def _count_trials_file(trials_path: Path) -> tuple[int, int]:
+    n = 0
+    n_ok = 0
+    if not trials_path.is_file():
+        return 0, 0
+    try:
+        for line in trials_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            n += 1
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("encode_ok") in (True, "true", "True", 1, "1"):
+                n_ok += 1
+    except OSError:
+        return 0, 0
+    return n, n_ok
+
+
+def list_segment_grid_videos() -> list[dict[str, Any]]:
+    """One catalog row per video: grid + adaptive trials merged."""
+    stems: set[str] = set()
+    for root in SEGMENT_GRID_ROOTS:
+        if not root.is_dir():
+            continue
+        for video_dir in root.iterdir():
+            if video_dir.is_dir() and any(video_dir.glob("segment_*/trials.jsonl")):
+                stems.add(video_dir.name)
+
+    videos: list[dict[str, Any]] = []
+    for stem in sorted(stems, key=str.lower):
+        seg_indices = _merged_segment_indices(stem)
+        if not seg_indices:
+            continue
+
+        segs: list[dict[str, Any]] = []
+        all_sources: set[str] = set()
+        total_trials = 0
+        total_ok = 0
+        for idx in seg_indices:
+            merged, sources = _load_merged_segment_trials(stem, idx)
+            all_sources.update(sources)
+            per_root: dict[str, int] = {}
+            for root in SEGMENT_GRID_ROOTS:
+                n, _ = _count_trials_file(
+                    root / stem / f"segment_{idx:02d}" / "trials.jsonl"
+                )
+                if n:
+                    per_root[root.name.replace("segment_crf_aq_", "")] = n
+            n_ok = sum(1 for r in merged if _trial_ok(r))
+            segs.append(
+                {
+                    "segment_index": idx,
+                    "n_trials": len(merged),
+                    "n_ok": n_ok,
+                    "per_root": per_root,
+                }
+            )
+            total_trials += len(merged)
+            total_ok += n_ok
+
+        expected = _expected_segment_count(stem)
+        source_labels = sorted(
+            s.replace("segment_crf_aq_", "") for s in all_sources
+        )
+        method_label = "+".join(source_labels) if source_labels else "merged"
+        videos.append(
+            {
+                "video_stem": stem,
+                "catalog_key": f"merged|{stem}",
+                "source_root": "merged",
+                "method": "merged",
+                "method_label": method_label,
+                "work_dir": str(SEGMENT_GRID_ROOTS[0].parent / stem)
+                if SEGMENT_GRID_ROOTS
+                else stem,
+                "segments": segs,
+                "n_segments": len(segs),
+                "expected_n_segments": expected,
+                "incomplete": (
+                    expected is not None and len(segs) < int(expected)
+                ),
+                "n_trials": total_trials,
+                "n_ok": total_ok,
+                "sources": sorted(all_sources),
+            }
+        )
+    return videos
+
+
+def _trial_ok(row: dict[str, Any]) -> bool:
+    v = row.get("encode_ok")
+    if isinstance(v, str):
+        return v.lower() in {"1", "true", "yes"}
+    if v is None:
+        return True
+    return bool(v)
+
+
+def _trial_float(row: dict[str, Any], key: str) -> float | None:
+    try:
+        v = row.get(key)
+        if v is None or v == "":
+            return None
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _best_trial(
+    rows: list[dict[str, Any]], *, gated: bool = False
+) -> dict[str, Any] | None:
+    cand = [r for r in rows if _trial_ok(r)]
+    if gated:
+        cand = [r for r in cand if r.get("gates_ok")]
+    if not cand:
+        return None
+    best = max(cand, key=lambda r: float(_trial_float(r, "s_f") or 0.0))
+    return {
+        "crf": int(float(best.get("crf") or 0)),
+        "aq_strength": float(best.get("aq_strength") or 0.0),
+        "s_f": _trial_float(best, "s_f"),
+        "vmaf_neg": _trial_float(best, "vmaf_neg"),
+        "vmaf_base": _trial_float(best, "vmaf_base"),
+        "compression_rate": _trial_float(best, "compression_rate"),
+        "compression_ratio": _trial_float(best, "compression_ratio"),
+        "gates_ok": bool(best.get("gates_ok")),
+        "reason": best.get("reason"),
+        "params": best.get("params"),
+    }
+
+
+def build_segment_grid_surface(
+    video_stem: str,
+    segment_index: int,
+    *,
+    gates_only: bool = False,
+    source_root: str | None = None,
+) -> dict[str, Any]:
+    """Build CRF × aq mesh data for 3D surfaces (s_f / ratio / vmaf_neg)."""
+    stem = _safe_grid_stem(video_stem)
+    if stem is None:
+        raise ValueError("invalid video stem")
+
+    use_merged = not source_root or source_root.strip().lower() in {
+        "merged",
+        "mix",
+        "all",
+    }
+    sources_used: list[str] = []
+    video_dir: Path | None = None
+    root_match: Path | None = None
+
+    if use_merged:
+        rows, sources_used = _load_merged_segment_trials(stem, segment_index)
+        if not rows:
+            raise FileNotFoundError(f"no trials for {stem} segment {segment_index}")
+        for root in SEGMENT_GRID_ROOTS:
+            if (root / stem).is_dir():
+                video_dir = root / stem
+                root_match = root
+                break
+    else:
+        sr = source_root.strip()
+        for root, s, vdir in _segment_grid_video_dirs():
+            if s != stem:
+                continue
+            if root.name != sr and str(root) != sr and not str(root).endswith(sr):
+                continue
+            video_dir = vdir
+            root_match = root
+            sources_used = [root.name]
+            break
+        if video_dir is None:
+            raise FileNotFoundError(f"no segment grid results for {stem}")
+        rows = _load_segment_trials(video_dir, segment_index)
+        if not rows:
+            raise FileNotFoundError(
+                f"no trials for {stem} segment {segment_index}"
+            )
+
+    ok_rows = [r for r in rows if _trial_ok(r)]
+    if gates_only:
+        ok_rows = [r for r in ok_rows if r.get("gates_ok")]
+
+    crfs = sorted({int(float(r["crf"])) for r in ok_rows if r.get("crf") is not None})
+    aqs = sorted(
+        {
+            round(float(r["aq_strength"]), 4)
+            for r in ok_rows
+            if r.get("aq_strength") is not None
+        }
+    )
+    metrics = ("s_f", "compression_ratio", "vmaf_neg", "vmaf_base", "compression_rate")
+    # z[metric][aq_idx][crf_idx] — Plotly Surface expects this orientation.
+    surfaces: dict[str, list[list[float | None]]] = {
+        m: [[None for _ in crfs] for _ in aqs] for m in metrics
+    }
+    for r in ok_rows:
+        try:
+            ci = crfs.index(int(float(r["crf"])))
+            ai = aqs.index(round(float(r["aq_strength"]), 4))
+        except (ValueError, KeyError, TypeError):
+            continue
+        for m in metrics:
+            val = _trial_float(r, m)
+            if val is not None:
+                surfaces[m][ai][ci] = val
+
+    trial_out: list[dict[str, Any]] = []
+    for r in ok_rows:
+        trial_out.append(
+            {
+                "crf": int(float(r.get("crf") or 0)),
+                "aq_strength": float(r.get("aq_strength") or 0.0),
+                "s_f": _trial_float(r, "s_f"),
+                "vmaf_neg": _trial_float(r, "vmaf_neg"),
+                "vmaf_base": _trial_float(r, "vmaf_base"),
+                "compression_rate": _trial_float(r, "compression_rate"),
+                "compression_ratio": _trial_float(r, "compression_ratio"),
+                "gates_ok": bool(r.get("gates_ok")),
+                "encode_ok": _trial_ok(r),
+                "reason": r.get("reason"),
+            }
+        )
+    trial_out.sort(key=lambda t: (t["crf"], t["aq_strength"]))
+
+    n_cells = max(1, len(crfs) * len(aqs))
+    sparse = len(ok_rows) < n_cells * 0.85
+
+    return {
+        "video_stem": stem,
+        "segment_index": int(segment_index),
+        "work_dir": str(video_dir) if video_dir else "",
+        "source_root": "merged" if use_merged else (str(root_match) if root_match else None),
+        "method": "merged" if use_merged else (root_match.name if root_match else None),
+        "sources": sources_used,
+        "n_trials": len(rows),
+        "n_ok": len(ok_rows),
+        "gates_only": bool(gates_only),
+        "sparse": sparse,
+        "crfs": crfs,
+        "aqs": aqs,
+        "surfaces": surfaces,
+        "best": _best_trial(rows, gated=False),
+        "best_gated": _best_trial(rows, gated=True),
+        "trials": trial_out,
+    }
+
+
+_segment_analyze_lock = threading.Lock()
+_segment_analyze_status: dict[str, Any] = {
+    "running": False,
+    "phase": "idle",
+    "message": "",
+    "video": None,
+    "stem": None,
+    "error": None,
+    "result": None,
+}
+
+
+def _segment_dir_for_stem(stem: str) -> Path:
+    return SEGMENTED_DIR / stem
+
+
+def _expected_segment_count(stem: str) -> int | None:
+    """Segment count from segmented videos manifest, if available."""
+    manifest_path = SEGMENTED_DIR / stem / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    segs = manifest.get("segments") or []
+    return len(segs) if segs else None
+
+
+def _find_segment_grid_dir(stem: str) -> Path | None:
+    for _root, s, vdir in _segment_grid_video_dirs():
+        if s == stem:
+            return vdir
+    return None
+
+
+def _segment_sweep_dirs(stem: str) -> list[tuple[Path, Path]]:
+    """(root, video_dir) for every sweep root that has this video."""
+    out: list[tuple[Path, Path]] = []
+    for root in SEGMENT_GRID_ROOTS:
+        video_dir = root / stem
+        if video_dir.is_dir() and any(video_dir.glob("segment_*/trials.jsonl")):
+            out.append((root, video_dir))
+    return out
+
+
+def _segment_encode_best(stem: str, index: int) -> dict[str, Any] | None:
+    """Best trial from merged grid + adaptive (and other sweep roots)."""
+    rows, sources = _load_merged_segment_trials(stem, index)
+    if not rows:
+        return None
+    gated = _best_trial(rows, gated=True)
+    best = gated or _best_trial(rows, gated=False)
+    if best is None:
+        return None
+    out = dict(best)
+    out["_sweep_root"] = "+".join(
+        s.replace("segment_crf_aq_", "") for s in sources
+    )
+    return out
+
+
+def _rich_features_for_stem(stem: str) -> dict[str, Any] | None:
+    path = FEATURES_DIR / f"{stem}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _segment_encode_fields(best: dict[str, Any] | None) -> dict[str, Any]:
+    if not best:
+        return {
+            "crf": None,
+            "aq_strength": None,
+            "compression_ratio": None,
+            "compression_rate": None,
+            "vmaf": None,
+            "vmaf_neg": None,
+            "vmaf_base": None,
+            "final_score": None,
+            "encode_best": None,
+            "encode_source": None,
+        }
+    vmaf = best.get("vmaf_neg")
+    if vmaf is None:
+        vmaf = best.get("vmaf_base")
+    sweep_root = str(best.get("_sweep_root") or "")
+    encode_source = sweep_root.replace("segment_crf_aq_", "") if sweep_root else None
+    clean_best = {k: v for k, v in best.items() if not str(k).startswith("_")}
+    return {
+        "crf": best.get("crf"),
+        "aq_strength": best.get("aq_strength"),
+        "compression_ratio": best.get("compression_ratio"),
+        "compression_rate": best.get("compression_rate"),
+        "vmaf": vmaf,
+        "vmaf_neg": best.get("vmaf_neg"),
+        "vmaf_base": best.get("vmaf_base"),
+        "final_score": best.get("s_f"),
+        "encode_best": clean_best,
+        "encode_source": encode_source,
+    }
+
+
+def _segments_already_split(stem: str) -> bool:
+    out_dir = _segment_dir_for_stem(stem)
+    manifest_path = out_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    segs = manifest.get("segments") or []
+    if not segs:
+        return False
+    return all((out_dir / str(s.get("file") or "")).is_file() for s in segs)
+
+
+def get_video_segments(video_name: str) -> dict[str, Any]:
+    """Return segment clips + features (+ best CRF/AQ when sweep data exists)."""
+    safe = Path(unquote(video_name)).name
+    stem = _safe_grid_stem(safe)
+    if stem is None:
+        raise ValueError(f"invalid video name: {video_name!r}")
+
+    source = _find_raw_video(f"{stem}.mp4") or _find_raw_video(safe)
+    out_dir = _segment_dir_for_stem(stem)
+    manifest_path = out_dir / "manifest.json"
+    split = _segments_already_split(stem)
+    rich = _rich_features_for_stem(stem)
+
+    segments: list[dict[str, Any]] = []
+    if split and manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        rich_by_idx: dict[int, dict[str, Any]] = {}
+        if rich:
+            for row in rich.get("segments") or []:
+                if isinstance(row, dict) and row.get("index") is not None:
+                    rich_by_idx[int(row["index"])] = row
+        for row in manifest.get("segments") or []:
+            if not isinstance(row, dict):
+                continue
+            idx = int(row.get("index") or 0)
+            fname = str(row.get("file") or "")
+            clip = out_dir / fname
+            feats = dict(row.get("features") or {})
+            for key in (
+                "si",
+                "ti",
+                "noise",
+                "flatness",
+                "duration_sec",
+                "luma_mean",
+                "sat_mean",
+                "difficulty",
+                "motion",
+                "texture",
+                "edge",
+                "entropy",
+                "hf_energy",
+            ):
+                if key not in feats and row.get(key) is not None:
+                    feats[key] = row.get(key)
+            rich_row = rich_by_idx.get(idx) or {}
+            for key in (
+                "difficulty",
+                "motion",
+                "motion_p90",
+                "texture",
+                "edge",
+                "entropy",
+                "hf_energy",
+            ):
+                if key not in feats and rich_row.get(key) is not None:
+                    feats[key] = rich_row.get(key)
+            best = _segment_encode_best(stem, idx)
+            segments.append(
+                {
+                    "index": idx,
+                    "file": fname,
+                    "url": f"/media/segment/{stem}/{fname}" if clip.is_file() else None,
+                    "start_frame": row.get("start_frame"),
+                    "end_frame": row.get("end_frame"),
+                    "start_sec": row.get("start_sec"),
+                    "end_sec": row.get("end_sec"),
+                    "duration_sec": row.get("duration_sec"),
+                    "frame_count": row.get("frame_count"),
+                    "size_bytes": row.get("size_bytes"),
+                    "size_human": _fmt_bytes(int(row.get("size_bytes") or 0)),
+                    "features": feats,
+                    **_segment_encode_fields(best),
+                }
+            )
+    elif rich and isinstance(rich.get("segments"), list):
+        # Features exist but clips not split yet — still return feature plan.
+        for row in rich["segments"]:
+            if not isinstance(row, dict):
+                continue
+            idx = int(row.get("index") or 0)
+            feats = {
+                k: row.get(k)
+                for k in (
+                    "si",
+                    "ti",
+                    "noise",
+                    "flatness",
+                    "duration",
+                    "luma_mean",
+                    "sat_mean",
+                    "difficulty",
+                    "motion",
+                    "motion_p90",
+                    "texture",
+                    "edge",
+                    "entropy",
+                    "hf_energy",
+                )
+                if row.get(k) is not None
+            }
+            if "duration" in feats and "duration_sec" not in feats:
+                feats["duration_sec"] = feats.pop("duration")
+            best = _segment_encode_best(stem, idx)
+            segments.append(
+                {
+                    "index": idx,
+                    "file": None,
+                    "url": None,
+                    "start_frame": row.get("start_frame"),
+                    "end_frame": row.get("end_frame"),
+                    "start_sec": row.get("start_sec"),
+                    "end_sec": row.get("end_sec"),
+                    "duration_sec": row.get("duration") or row.get("duration_sec"),
+                    "frame_count": row.get("frame_count"),
+                    "size_bytes": None,
+                    "size_human": None,
+                    "features": feats,
+                    **_segment_encode_fields(best),
+                }
+            )
+
+    segments.sort(key=lambda s: int(s.get("index") or 0))
+    global_feats: dict[str, Any] = {}
+    summary: dict[str, Any] = {}
+    meta: dict[str, Any] = {}
+    if rich:
+        if isinstance(rich.get("global"), dict):
+            global_feats = dict(rich["global"])
+        if isinstance(rich.get("summary_raw"), dict):
+            summary = dict(rich["summary_raw"])
+        if isinstance(rich.get("meta"), dict):
+            meta = {
+                k: rich["meta"].get(k)
+                for k in ("width", "height", "fps", "frame_count", "duration")
+                if rich["meta"].get(k) is not None
+            }
+    source_bytes = int(_file_size(source) or 0) if source else 0
+    duration = meta.get("duration")
+    if duration is None and global_feats.get("duration") is not None:
+        duration = global_feats.get("duration")
+        meta["duration"] = duration
+    bitrate_bps: float | None = None
+    if source_bytes > 0 and duration and float(duration) > 0:
+        bitrate_bps = (float(source_bytes) * 8.0) / float(duration)
+    return {
+        "video": source.name if source else f"{stem}.mp4",
+        "stem": stem,
+        "source_path": str(source) if source else None,
+        "split": split,
+        "has_features": rich is not None,
+        "output_dir": str(out_dir),
+        "n_segments": len(segments),
+        "source_size_bytes": source_bytes or None,
+        "source_size_human": _fmt_bytes(source_bytes) if source_bytes else None,
+        "bitrate_bps": bitrate_bps,
+        "global_features": global_feats,
+        "summary": summary,
+        "meta": meta,
+        "segments": segments,
+    }
+
+
+def segment_analyze_status() -> dict[str, Any]:
+    with _segment_analyze_lock:
+        return dict(_segment_analyze_status)
+
+
+def run_segment_analyze_sync(video_name: str, *, force: bool = False) -> dict[str, Any]:
+    """Split a video into segments (reuse existing clips unless force)."""
+    global _segment_analyze_status
+    safe = Path(unquote(video_name)).name
+    stem = _safe_grid_stem(safe)
+    if stem is None:
+        raise ValueError(f"invalid video name: {video_name!r}")
+    source = _find_raw_video(f"{stem}.mp4") or _find_raw_video(safe)
+    if source is None:
+        raise FileNotFoundError(f"video not found: {safe}")
+
+    with _segment_analyze_lock:
+        if _segment_analyze_status.get("running"):
+            return dict(_segment_analyze_status)
+        _segment_analyze_status = {
+            "running": True,
+            "phase": "starting",
+            "message": f"Analyzing {source.name}…",
+            "video": source.name,
+            "stem": stem,
+            "error": None,
+            "result": None,
+        }
+
+    try:
+        already = _segments_already_split(stem)
+        if already and not force:
+            with _segment_analyze_lock:
+                _segment_analyze_status["phase"] = "loading"
+                _segment_analyze_status["message"] = (
+                    f"Using existing segments for {stem}"
+                )
+            result = get_video_segments(source.name)
+            with _segment_analyze_lock:
+                _segment_analyze_status.update(
+                    {
+                        "running": False,
+                        "phase": "done",
+                        "message": (
+                            f"{result['n_segments']} segment(s) ready (cached)"
+                        ),
+                        "result": result,
+                    }
+                )
+                return dict(_segment_analyze_status)
+
+        from ffmpeg_tools import resolve_binary
+        from scripts.split_videos_by_segment import split_one_video
+
+        with _segment_analyze_lock:
+            _segment_analyze_status["phase"] = "splitting"
+            _segment_analyze_status["message"] = (
+                f"Detecting scenes and splitting {source.name}…"
+            )
+
+        ffmpeg_bin = resolve_binary("ffmpeg")
+        SEGMENTED_DIR.mkdir(parents=True, exist_ok=True)
+        FEATURES_DIR.mkdir(parents=True, exist_ok=True)
+        split_one_video(
+            source,
+            output_root=SEGMENTED_DIR,
+            features_dir=FEATURES_DIR,
+            use_cached_features=True,
+            force_features=bool(force),
+            ffmpeg_bin=ffmpeg_bin,
+            copy_streams=False,
+            lossless=True,
+            crf=0,
+            preset="ultrafast",
+            resume=not force,
+            scene_detector="content",
+        )
+        result = get_video_segments(source.name)
+        with _segment_analyze_lock:
+            _segment_analyze_status.update(
+                {
+                    "running": False,
+                    "phase": "done",
+                    "message": f"{result['n_segments']} segment(s) ready",
+                    "result": result,
+                }
+            )
+            return dict(_segment_analyze_status)
+    except Exception as exc:  # noqa: BLE001
+        with _segment_analyze_lock:
+            _segment_analyze_status.update(
+                {
+                    "running": False,
+                    "phase": "error",
+                    "message": str(exc),
+                    "error": str(exc),
+                    "result": None,
+                }
+            )
+            return dict(_segment_analyze_status)
+
+
+def start_segment_analyze(video_name: str, *, force: bool = False) -> dict[str, Any]:
+    with _segment_analyze_lock:
+        if _segment_analyze_status.get("running"):
+            return {"started": False, "status": dict(_segment_analyze_status)}
+    thread = threading.Thread(
+        target=run_segment_analyze_sync,
+        kwargs={"video_name": video_name, "force": force},
+        daemon=True,
+    )
+    thread.start()
+    # Give the worker a moment to flip running=True.
+    time.sleep(0.05)
+    with _segment_analyze_lock:
+        return {"started": True, "status": dict(_segment_analyze_status)}
+
+
+DASHBOARD_SEG_ENCODE_DIR = Path(
+    os.environ.get(
+        "DASHBOARD_SEG_ENCODE_DIR",
+        ROOT / "work" / "dashboard_seg_encode",
+    )
+)
+
+_seg_encode_lock = threading.Lock()
+_seg_encode_status: dict[str, Any] = {
+    "running": False,
+    "phase": "idle",
+    "message": "",
+    "video": None,
+    "stem": None,
+    "error": None,
+    "result": None,
+    "log": "",
+}
+
+
+def _append_seg_encode_log(line: str) -> None:
+    with _seg_encode_lock:
+        existing = str(_seg_encode_status.get("log") or "")
+        chunk = line if line.endswith("\n") else f"{line}\n"
+        merged = existing + chunk
+        if len(merged) > 80_000:
+            merged = merged[-80_000:]
+        _seg_encode_status["log"] = merged
+
+
+def seg_encode_status() -> dict[str, Any]:
+    with _seg_encode_lock:
+        return dict(_seg_encode_status)
+
+
+def _luma_for_feature_params(raw: Any) -> float:
+    """Feature mapper expects ~0–255 luma; rich features often store 0–1."""
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 128.0
+    if v <= 1.5:
+        return v * 255.0
+    return v
+
+
+def _segment_dict_for_feature_params(
+    seg: dict[str, Any],
+    *,
+    fps: float,
+) -> dict[str, Any]:
+    """Adapt rich/ML segment stats into propose_feature_x265_params shape."""
+    from feature_extractor import (
+        _EDGE_DENSITY_MID,
+        _MOTION_P90_MID,
+        _NOISE_LEVEL_MID,
+        _TEXTURE_MID,
+        soft_level,
+    )
+
+    feats = dict(seg.get("features") or {})
+    motion = float(
+        feats.get("motion_p90")
+        or seg.get("motion_p90")
+        or feats.get("motion")
+        or seg.get("motion")
+        or 0.0
+    )
+    texture = float(feats.get("texture") or seg.get("texture") or 0.0)
+    noise = float(feats.get("noise") or seg.get("noise") or 0.0)
+    edge = float(feats.get("edge") or seg.get("edge") or 0.0)
+    difficulty = float(feats.get("difficulty") or seg.get("difficulty") or 0.0)
+    duration = float(
+        seg.get("duration_sec")
+        or feats.get("duration_sec")
+        or feats.get("duration")
+        or seg.get("duration")
+        or 1.0
+    )
+    return {
+        "motion_level": soft_level(motion, _MOTION_P90_MID),
+        "texture_level": soft_level(texture, _TEXTURE_MID),
+        "noise_level_norm": soft_level(noise, _NOISE_LEVEL_MID),
+        "edge_level": soft_level(edge, _EDGE_DENSITY_MID),
+        "cut_level": 0.0,
+        "flatness": float(feats.get("flatness") or seg.get("flatness") or 0.0),
+        "entropy": float(feats.get("entropy") or seg.get("entropy") or 0.5),
+        "luma_mean": _luma_for_feature_params(
+            feats.get("luma_mean", seg.get("luma_mean"))
+        ),
+        "worst_difficulty": difficulty,
+        "hard_fraction": 1.0 if difficulty >= 0.45 else 0.0,
+        "volatility": 0.0,
+        "segment_count": 1.0,
+        "duration": max(duration, 0.1),
+        "fps": float(fps),
+        "texture": texture,
+    }
+
+
+def propose_feature_based_segment_params(
+    video_name: str,
+    *,
+    vmaf_threshold: int = 85,
+) -> dict[str, Any]:
+    """Fill per-segment CRF / aq / x265-params from extracted features."""
+    from interp_search import format_x265_params, propose_feature_x265_params
+    from recipes import adjust_crf_for_volatility, crf_seed_for_threshold
+
+    payload = get_video_segments(video_name)
+    stem = payload["stem"]
+    rich = _rich_features_for_stem(stem) or {}
+    meta = payload.get("meta") or rich.get("meta") or {}
+    fps = float(meta.get("fps") or rich.get("global", {}).get("fps") or 30.0)
+    rich_by_idx: dict[int, dict[str, Any]] = {}
+    for row in rich.get("segments") or []:
+        if isinstance(row, dict) and row.get("index") is not None:
+            rich_by_idx[int(row["index"])] = row
+
+    seed = crf_seed_for_threshold(int(vmaf_threshold))
+    candidates: list[dict[str, Any]] = []
+    for seg in payload.get("segments") or []:
+        idx = int(seg.get("index") or 0)
+        merged = {**seg, **(rich_by_idx.get(idx) or {})}
+        if isinstance(seg.get("features"), dict):
+            merged_feats = {**(rich_by_idx.get(idx) or {}), **seg["features"]}
+            merged["features"] = merged_feats
+        feat_dict = _segment_dict_for_feature_params(merged, fps=fps)
+        params, reasons = propose_feature_x265_params(feat_dict, fps=fps)
+        params_str = format_x265_params(params)
+        aq = params.get("aq-strength")
+        try:
+            aq_f = float(aq) if aq is not None else None
+        except (TypeError, ValueError):
+            aq_f = None
+        crf = int(adjust_crf_for_volatility(seed, feat_dict))
+        candidates.append(
+            {
+                "index": idx,
+                "crf": crf,
+                "aq_strength": aq_f,
+                "params": params_str,
+                "reasons": list(reasons or [])[:8],
+            }
+        )
+    return {
+        "video": payload.get("video"),
+        "stem": stem,
+        "vmaf_threshold": int(vmaf_threshold),
+        "n_segments": len(candidates),
+        "candidates": candidates,
+    }
+
+
+def _merge_params_aq(params: str, aq_strength: Any) -> str:
+    from interp_search import format_x265_params, parse_x265_params
+
+    obj = parse_x265_params(params or "")
+    if aq_strength is not None and str(aq_strength).strip() != "":
+        try:
+            obj["aq-strength"] = f"{float(aq_strength):g}"
+        except (TypeError, ValueError):
+            pass
+    return format_x265_params(obj)
+
+
+def _ffmpeg_concat_copy(parts: list[Path], out_path: Path) -> None:
+    from ffmpeg_tools import resolve_binary
+
+    if not parts:
+        raise ValueError("no parts to concat")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    list_path = out_path.with_suffix(".concat.txt")
+    lines = []
+    for p in parts:
+        # ffmpeg concat demuxer needs escaped single quotes
+        esc = str(p.resolve()).replace("'", r"'\''")
+        lines.append(f"file '{esc}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ffmpeg = resolve_binary("ffmpeg")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0 or not out_path.is_file():
+        raise RuntimeError(
+            (proc.stderr or proc.stdout or "concat failed")[-800:]
+        )
+
+
+def run_segment_encode_sync(
+    video_name: str,
+    segments: list[dict[str, Any]],
+    *,
+    preset: str = "fast",
+) -> dict[str, Any]:
+    """Encode each segment with UI params, then concat into a full compressed video."""
+    global _seg_encode_status
+    from encoder import encode_hevc
+
+    safe = Path(unquote(video_name)).name
+    stem = _safe_grid_stem(safe)
+    if stem is None:
+        raise ValueError(f"invalid video name: {video_name!r}")
+    source = _find_raw_video(f"{stem}.mp4") or _find_raw_video(safe)
+    if source is None:
+        raise FileNotFoundError(f"video not found: {safe}")
+    info = get_video_segments(source.name)
+    by_idx = {int(s["index"]): s for s in (info.get("segments") or [])}
+
+    with _seg_encode_lock:
+        if _seg_encode_status.get("running"):
+            return dict(_seg_encode_status)
+        _seg_encode_status = {
+            "running": True,
+            "phase": "encoding",
+            "message": f"Encoding segments for {source.name}…",
+            "video": source.name,
+            "stem": stem,
+            "error": None,
+            "result": None,
+            "log": "",
+        }
+
+    out_root = DASHBOARD_SEG_ENCODE_DIR / stem
+    out_root.mkdir(parents=True, exist_ok=True)
+    encoded_parts: list[Path] = []
+    segment_results: list[dict[str, Any]] = []
+
+    try:
+        if not segments:
+            raise ValueError("segments list is empty")
+        for i, spec in enumerate(segments):
+            idx = int(spec.get("index"))
+            meta = by_idx.get(idx)
+            if meta is None:
+                raise FileNotFoundError(f"segment {idx} not found for {stem}")
+            clip_name = meta.get("file")
+            clip = (
+                (_segment_dir_for_stem(stem) / str(clip_name))
+                if clip_name
+                else None
+            )
+            if clip is None or not clip.is_file():
+                raise FileNotFoundError(
+                    f"segment clip missing for seg[{idx}] — run Analyze first"
+                )
+            crf_raw = spec.get("crf")
+            if crf_raw in (None, ""):
+                raise ValueError(f"seg[{idx}] missing CRF")
+            crf = int(float(crf_raw))
+            params = _merge_params_aq(
+                str(spec.get("params") or ""),
+                spec.get("aq_strength"),
+            )
+            if not params.strip():
+                raise ValueError(f"seg[{idx}] missing x265-params")
+            out_path = out_root / f"seg{idx:02d}_crf{crf}.mp4"
+            msg = f"[{i + 1}/{len(segments)}] seg[{idx}] CRF{crf}…"
+            with _seg_encode_lock:
+                _seg_encode_status["message"] = msg
+            _append_seg_encode_log(msg)
+            t0 = time.time()
+            result = encode_hevc(
+                str(clip),
+                str(out_path),
+                preset=str(preset or "fast"),
+                params=params,
+                codec_mode="RC",
+                crf=crf,
+                encoder="libx265",
+                progress_label=f"{stem[:8]} seg{idx}",
+            )
+            elapsed = time.time() - t0
+            if not result.ok:
+                raise RuntimeError(
+                    f"seg[{idx}] encode failed: {result.stderr_tail[-400:]}"
+                )
+            size_out = int(_file_size(out_path) or 0)
+            size_in = int(meta.get("size_bytes") or _file_size(clip) or 0)
+            ratio = (size_in / size_out) if size_out > 0 and size_in > 0 else None
+            encoded_parts.append(out_path)
+            row = {
+                "index": idx,
+                "crf": crf,
+                "aq_strength": spec.get("aq_strength"),
+                "params": params,
+                "output": str(out_path),
+                "url": f"/media/seg-encode/{stem}/{out_path.name}",
+                "size_bytes": size_out,
+                "size_human": _fmt_bytes(size_out),
+                "compression_ratio": ratio,
+                "encode_sec": round(elapsed, 2),
+            }
+            segment_results.append(row)
+            _append_seg_encode_log(
+                f"  ok seg[{idx}] {row['size_human']} "
+                f"ratio={ratio:.2f}x" if ratio else f"  ok seg[{idx}] {row['size_human']}"
+            )
+
+        with _seg_encode_lock:
+            _seg_encode_status["phase"] = "concat"
+            _seg_encode_status["message"] = "Concatenating full compressed video…"
+        full_path = out_root / "full.mp4"
+        _ffmpeg_concat_copy(encoded_parts, full_path)
+        full_size = int(_file_size(full_path) or 0)
+        src_size = int(_file_size(source) or 0)
+        full_ratio = (src_size / full_size) if full_size > 0 and src_size > 0 else None
+        _append_seg_encode_log(
+            f"full concat → {full_path.name} {_fmt_bytes(full_size)}"
+            + (f" ratio={full_ratio:.2f}x" if full_ratio else "")
+        )
+
+        # Also encode a single-pass full-file using duration-weighted CRF + longest-seg params.
+        with _seg_encode_lock:
+            _seg_encode_status["message"] = "Encoding single-pass full video…"
+        total_dur = 0.0
+        weighted_crf = 0.0
+        longest = None
+        longest_dur = -1.0
+        for spec in segments:
+            idx = int(spec.get("index"))
+            meta = by_idx.get(idx) or {}
+            dur = float(meta.get("duration_sec") or 1.0)
+            total_dur += dur
+            weighted_crf += float(spec.get("crf")) * dur
+            if dur >= longest_dur:
+                longest_dur = dur
+                longest = spec
+        full_crf = int(round(weighted_crf / max(total_dur, 1e-6)))
+        full_params = _merge_params_aq(
+            str((longest or {}).get("params") or ""),
+            (longest or {}).get("aq_strength"),
+        )
+        full_single = out_root / f"full_single_crf{full_crf}.mp4"
+        t0 = time.time()
+        full_res = encode_hevc(
+            str(source),
+            str(full_single),
+            preset=str(preset or "fast"),
+            params=full_params,
+            codec_mode="RC",
+            crf=full_crf,
+            encoder="libx265",
+            progress_label=f"{stem[:8]} full",
+        )
+        if not full_res.ok:
+            raise RuntimeError(
+                f"full encode failed: {full_res.stderr_tail[-400:]}"
+            )
+        full_single_size = int(_file_size(full_single) or 0)
+        full_single_ratio = (
+            (src_size / full_single_size)
+            if full_single_size > 0 and src_size > 0
+            else None
+        )
+        payload = {
+            "video": source.name,
+            "stem": stem,
+            "preset": preset,
+            "output_dir": str(out_root),
+            "segments": segment_results,
+            "full_concat": {
+                "output": str(full_path),
+                "url": f"/media/seg-encode/{stem}/{full_path.name}",
+                "size_bytes": full_size,
+                "size_human": _fmt_bytes(full_size),
+                "compression_ratio": full_ratio,
+            },
+            "full_single": {
+                "crf": full_crf,
+                "params": full_params,
+                "output": str(full_single),
+                "url": f"/media/seg-encode/{stem}/{full_single.name}",
+                "size_bytes": full_single_size,
+                "size_human": _fmt_bytes(full_single_size),
+                "compression_ratio": full_single_ratio,
+                "encode_sec": round(time.time() - t0, 2),
+            },
+        }
+        try:
+            (out_root / "result.json").write_text(
+                json.dumps(payload, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+        with _seg_encode_lock:
+            _seg_encode_status.update(
+                {
+                    "running": False,
+                    "phase": "done",
+                    "message": (
+                        f"Done — {len(segment_results)} segment(s) + full "
+                        f"({_fmt_bytes(full_size)} concat, "
+                        f"{_fmt_bytes(full_single_size)} single)"
+                    ),
+                    "result": payload,
+                }
+            )
+            return dict(_seg_encode_status)
+    except Exception as exc:  # noqa: BLE001
+        with _seg_encode_lock:
+            _seg_encode_status.update(
+                {
+                    "running": False,
+                    "phase": "error",
+                    "message": str(exc),
+                    "error": str(exc),
+                    "result": {
+                        "video": source.name,
+                        "stem": stem,
+                        "segments": segment_results,
+                    },
+                }
+            )
+            return dict(_seg_encode_status)
+
+
+def start_segment_encode(
+    video_name: str,
+    segments: list[dict[str, Any]],
+    *,
+    preset: str = "fast",
+) -> dict[str, Any]:
+    with _seg_encode_lock:
+        if _seg_encode_status.get("running"):
+            return {"started": False, "status": dict(_seg_encode_status)}
+    thread = threading.Thread(
+        target=run_segment_encode_sync,
+        kwargs={
+            "video_name": video_name,
+            "segments": segments,
+            "preset": preset,
+        },
+        daemon=True,
+    )
+    thread.start()
+    time.sleep(0.05)
+    with _seg_encode_lock:
+        return {"started": True, "status": dict(_seg_encode_status)}
+
+
+def _find_seg_encode_file(stem: str, filename: str) -> Path | None:
+    safe_stem = _safe_grid_stem(stem)
+    if safe_stem is None:
+        return None
+    fname = Path(unquote(filename)).name
+    if not re.fullmatch(r"[A-Za-z0-9._-]+\.mp4", fname):
+        return None
+    path = DASHBOARD_SEG_ENCODE_DIR / safe_stem / fname
+    return path if path.is_file() else None
+
+
+def get_segment_encode_result(video_name: str) -> dict[str, Any] | None:
+    """Load last dashboard segment-encode result.json if present."""
+    safe = Path(unquote(video_name)).name
+    stem = _safe_grid_stem(safe)
+    if stem is None:
+        return None
+    path = DASHBOARD_SEG_ENCODE_DIR / stem / "result.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _find_segment_clip(stem: str, filename: str) -> Path | None:
+    safe_stem = _safe_grid_stem(stem)
+    if safe_stem is None:
+        return None
+    fname = Path(unquote(filename)).name
+    if not re.fullmatch(r"seg\d+_f\d+-\d+\.mp4", fname):
+        return None
+    path = _segment_dir_for_stem(safe_stem) / fname
+    return path if path.is_file() else None
 
 
 def _raw_video_input_path(name: str) -> str:
@@ -1232,13 +2520,13 @@ def fetch_compression_challenges_sync() -> dict[str, Any]:
         if not urls:
             raise RuntimeError("No compression challenge URLs found in WandB output.log")
         RAW_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-        url_list_path = ROOT / "s3_videos" / "compression_urls.txt"
-        url_list_path.parent.mkdir(parents=True, exist_ok=True)
+        url_list_path = RAW_VIDEO_DIR / "compression_urls.txt"
         url_list_path.write_text("\n".join(urls) + "\n")
         _append_fetch_log(f"Extracted {len(urls)} compression URLs -> {url_list_path}")
         _append_fetch_log(f"Download target: {RAW_VIDEO_DIR}")
 
         with _fetch_lock:
+            _fetch_status["download_dir"] = str(RAW_VIDEO_DIR)
             _fetch_status["phase"] = "downloading"
             _fetch_status["total"] = len(urls)
             _fetch_status["message"] = f"Found {len(urls)} compression challenge videos"
@@ -1305,7 +2593,9 @@ def _start_fetch_thread() -> dict[str, Any]:
 
 def fetch_status() -> dict[str, Any]:
     with _fetch_lock:
-        return dict(_fetch_status)
+        status = dict(_fetch_status)
+        status.setdefault("download_dir", str(RAW_VIDEO_DIR))
+        return status
 
 
 def _normalize_dashboard_codec_mode(mode: str) -> str:
@@ -2257,6 +3547,68 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(clear_analyze_status())
             return
 
+        if parsed.path == "/api/segments/analyze":
+            body = self._read_json_body()
+            video = str(body.get("video") or body.get("name") or "").strip()
+            force = bool(body.get("force"))
+            if not video:
+                self._send_json({"error": "video is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                result = start_segment_analyze(video, force=force)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(result)
+            return
+
+        if parsed.path == "/api/segments/feature-candidates":
+            body = self._read_json_body()
+            video = str(body.get("video") or body.get("name") or "").strip()
+            thr = int(body.get("vmaf_threshold") or 85)
+            if not video:
+                self._send_json({"error": "video is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            if thr not in (85, 89, 93):
+                self._send_json(
+                    {"error": "vmaf_threshold must be 85, 89, or 93"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                payload = propose_feature_based_segment_params(
+                    video, vmaf_threshold=thr
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(payload)
+            return
+
+        if parsed.path == "/api/segments/compress":
+            body = self._read_json_body()
+            video = str(body.get("video") or body.get("name") or "").strip()
+            segments = body.get("segments") or []
+            preset = str(body.get("preset") or "fast").strip() or "fast"
+            if not video:
+                self._send_json({"error": "video is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            if not isinstance(segments, list) or not segments:
+                self._send_json(
+                    {"error": "segments must be a non-empty list"},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            try:
+                result = start_segment_encode(
+                    video, segments, preset=preset
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._send_json(result)
+            return
+
         self._send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_GET(self, head_only: bool = False) -> None:
@@ -2320,12 +3672,108 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(analyze_status())
             return
 
+        if path == "/api/segment-analyze-status":
+            self._send_json(segment_analyze_status())
+            return
+
+        if path == "/api/segment-encode-status":
+            self._send_json(seg_encode_status())
+            return
+
         if path == "/api/encode-defaults":
             self._send_json({"defaults": encode_defaults()})
             return
 
+        encode_result_match = re.fullmatch(
+            r"/api/segments/([^/]+)/encode-result",
+            path,
+        )
+        if encode_result_match:
+            payload = get_segment_encode_result(encode_result_match.group(1))
+            if payload is None:
+                self._send_json({"found": False, "result": None})
+                return
+            self._send_json({"found": True, "result": payload})
+            return
+
+        segments_match = re.fullmatch(r"/api/segments/([^/]+)", path)
+        if segments_match:
+            try:
+                payload = get_video_segments(segments_match.group(1))
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except FileNotFoundError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(payload)
+            return
+
+        if path == "/api/segment-grid/videos":
+            self._send_json({"videos": list_segment_grid_videos()})
+            return
+
+        grid_match = re.fullmatch(
+            r"/api/segment-grid/([^/]+)/(\d+)",
+            path,
+        )
+        if grid_match:
+            stem_raw, seg_raw = grid_match.groups()
+            qs = parse_qs(parsed.query)
+            gates_only = str((qs.get("gates_only") or ["0"])[0]).lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            source_root = (qs.get("source_root") or [""])[0].strip() or None
+            try:
+                payload = build_segment_grid_surface(
+                    stem_raw,
+                    int(seg_raw),
+                    gates_only=gates_only,
+                    source_root=source_root,
+                )
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            except FileNotFoundError as exc:
+                self._send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_json(payload)
+            return
+
         if path == "/api/analyze-logs":
             self._send_json({"logs": discover_log_paths()})
+            return
+
+        segment_media = re.fullmatch(r"/media/segment/([^/]+)/([^/]+)", path)
+        if segment_media:
+            stem, filename = segment_media.groups()
+            file_path = _find_segment_clip(stem, filename)
+            if file_path is None:
+                self._send_json({"error": "segment not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_file(file_path)
+            return
+
+        seg_encode_media = re.fullmatch(r"/media/seg-encode/([^/]+)/([^/]+)", path)
+        if seg_encode_media:
+            stem, filename = seg_encode_media.groups()
+            file_path = _find_seg_encode_file(stem, filename)
+            if file_path is None:
+                self._send_json({"error": "encode output not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_file(file_path)
+            return
+
+        thumb_match = re.fullmatch(r"/media/thumb/([^/]+)", path)
+        if thumb_match:
+            name = thumb_match.group(1)
+            file_path = ensure_video_thumbnail(name)
+            if file_path is None:
+                self._send_json({"error": "thumbnail not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self._send_file(file_path)
             return
 
         media_match = re.fullmatch(r"/media/(original|compressed)/([^/]+)", path)
@@ -2353,9 +3801,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     STATIC.mkdir(parents=True, exist_ok=True)
+    # Prime non-blocking cpu_percent samples.
+    psutil.cpu_percent(interval=None)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server.request_queue_size = 64
     print(f"Vidaio dashboard: http://{HOST}:{PORT}")
     print(f"Raw video dir: {RAW_VIDEO_DIR}")
+    print(f"Segmented dir: {SEGMENTED_DIR}")
     print(f"Legacy compression dir: {COMPRESSION_DIR}")
     try:
         server.serve_forever()

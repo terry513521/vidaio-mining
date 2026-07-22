@@ -71,6 +71,9 @@ class SegmentFeatures:
     noise_level: float
     flatness: float
 
+    si: float  # ITU-T P.910 spatial information (segment mean)
+    ti: float  # ITU-T P.910 temporal information (segment mean)
+
     luma_mean: float
     luma_std: float
     sat_mean: float
@@ -109,7 +112,7 @@ class HEVCFeatureExtractor:
         # Detail analysis: short side scaled toward _DETAIL_SHORT_SIDE px
         detail_short_side: float = _DETAIL_SHORT_SIDE,
         # Per-segment sampling
-        samples_per_segment: int = 8,
+        samples_per_segment: int = 16,
         max_segments: int = 64,
         hard_difficulty_threshold: float = 0.45,
     ):
@@ -220,6 +223,20 @@ class HEVCFeatureExtractor:
     def _texture_compensation(detail_scale: float) -> float:
         # Texture variance shrinks ~scale^2 when downsampling.
         return 1.0 / max(detail_scale * detail_scale, 1e-6)
+
+    @staticmethod
+    def compute_spatial_information(gray: np.ndarray) -> float:
+        """ITU-T P.910 SI: std dev of Sobel gradient magnitude on luminance."""
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_magnitude = np.sqrt(sobelx**2 + sobely**2)
+        return float(np.std(gradient_magnitude))
+
+    @staticmethod
+    def compute_temporal_information(prev_gray: np.ndarray, curr_gray: np.ndarray) -> float:
+        """ITU-T P.910 TI: std dev of consecutive-frame luminance difference."""
+        diff = cv2.absdiff(prev_gray, curr_gray)
+        return float(np.std(diff))
 
     @staticmethod
     def _resize_gray(frame: np.ndarray, scale: float) -> np.ndarray:
@@ -397,7 +414,6 @@ class HEVCFeatureExtractor:
         return out if out else [(0, max(1, frame_count))]
 
     @staticmethod
-    @staticmethod
     def _limit_segments(
         segments: list[tuple[int, int]],
         max_segments: int,
@@ -478,11 +494,21 @@ class HEVCFeatureExtractor:
         luma_std_vals: list[float] = []
         sat_vals: list[float] = []
         chroma_std_vals: list[float] = []
+        si_vals: list[float] = []
+        ti_vals: list[float] = []
+        prev_detail_for_ti: Optional[np.ndarray] = None
 
         for sample in samples:
             gray = sample.gray
             detail = sample.detail_gray
             sat = sample.sat
+
+            si_vals.append(self.compute_spatial_information(detail))
+            if prev_detail_for_ti is not None:
+                ti_vals.append(
+                    self.compute_temporal_information(prev_detail_for_ti, detail)
+                )
+            prev_detail_for_ti = detail
 
             lbp = local_binary_pattern(detail, 8, 1, method="uniform")
             texture_vals.append(float(np.var(lbp) / 20.0 * texture_comp))
@@ -523,6 +549,8 @@ class HEVCFeatureExtractor:
         high_freq_energy = float(np.mean(hf_vals)) if hf_vals else 0.0
         noise_level = float(np.mean(noise_vals)) if noise_vals else 0.0
         flatness = float(np.mean(flat_vals)) if flat_vals else 0.0
+        si = float(np.mean(si_vals)) if si_vals else 0.0
+        ti = float(np.mean(ti_vals)) if ti_vals else 0.0
         luma_mean = float(np.mean(luma_vals)) if luma_vals else 0.0
         luma_std = float(np.mean(luma_std_vals)) if luma_std_vals else 0.0
         sat_mean = float(np.mean(sat_vals)) if sat_vals else 0.0
@@ -555,6 +583,8 @@ class HEVCFeatureExtractor:
             high_freq_energy=high_freq_energy,
             noise_level=noise_level,
             flatness=flatness,
+            si=si,
+            ti=ti,
             luma_mean=luma_mean,
             luma_std=luma_std,
             sat_mean=sat_mean,
@@ -587,6 +617,8 @@ class HEVCFeatureExtractor:
             high_freq_energy=0.0,
             noise_level=0.0,
             flatness=0.0,
+            si=0.0,
+            ti=0.0,
             luma_mean=0.0,
             luma_std=0.0,
             sat_mean=0.0,

@@ -6,11 +6,27 @@ import os
 from typing import Optional
 
 
-def measure_compression(reference_path: str, output_path: str) -> tuple[float, float]:
-    """Return ``(compression_rate, compression_ratio)`` using validator semantics."""
-    if not os.path.isfile(reference_path) or not os.path.isfile(output_path):
+def measure_compression(
+    reference_path: str,
+    output_path: str,
+    *,
+    reference_bytes: Optional[int] = None,
+) -> tuple[float, float]:
+    """Return ``(compression_rate, compression_ratio)`` using validator semantics.
+
+    ``compression_rate = out / in``, ``compression_ratio = in / out``.
+
+    Prefer ``reference_bytes`` (e.g. source packet bytes for a segment) when the
+    VMAF reference file is a lossless re-encode and must not be used as size-in.
+    """
+    if not os.path.isfile(output_path):
         return 1.0, 1.0
-    original_size = os.path.getsize(reference_path)
+    if reference_bytes is not None:
+        original_size = int(reference_bytes)
+    elif os.path.isfile(reference_path):
+        original_size = os.path.getsize(reference_path)
+    else:
+        return 1.0, 1.0
     compressed_size = os.path.getsize(output_path)
     if original_size <= 0 or compressed_size >= original_size:
         return 1.0, 1.0
@@ -18,9 +34,16 @@ def measure_compression(reference_path: str, output_path: str) -> tuple[float, f
     return rate, 1.0 / rate
 
 
-def format_compression(reference_path: str, output_path: str) -> str:
+def format_compression(
+    reference_path: str,
+    output_path: str,
+    *,
+    reference_bytes: Optional[int] = None,
+) -> str:
     """Human-readable compression summary for logs."""
-    rate, ratio = measure_compression(reference_path, output_path)
+    rate, ratio = measure_compression(
+        reference_path, output_path, reference_bytes=reference_bytes
+    )
     if not os.path.isfile(output_path):
         return "rate=? ratio=?"
     out_mb = os.path.getsize(output_path) / (1024 * 1024)

@@ -168,12 +168,14 @@ def encode_hevc(
     nvenc_gpu: int = 0,
     nvenc_hwaccel: bool = False,
     progress_reference_path: Optional[str] = None,
+    progress_reference_bytes: Optional[int] = None,
     progress_label: Optional[str] = None,
     progress_interval_sec: float = 15.0,
 ) -> EncodeResult:
     """Encode full file or a time window (ss/t) with libx265 or hevc_nvenc."""
     progress_kwargs = {
         "progress_reference_path": progress_reference_path,
+        "progress_reference_bytes": progress_reference_bytes,
         "progress_label": progress_label,
         "progress_interval_sec": progress_interval_sec,
     }
@@ -234,6 +236,7 @@ def _run_ffmpeg(
     timeout: Optional[float],
     *,
     progress_reference_path: Optional[str] = None,
+    progress_reference_bytes: Optional[int] = None,
     progress_label: Optional[str] = None,
     progress_interval_sec: float = 15.0,
 ) -> EncodeResult:
@@ -243,6 +246,7 @@ def _run_ffmpeg(
             output_path,
             timeout,
             progress_reference_path=progress_reference_path,
+            progress_reference_bytes=progress_reference_bytes,
             progress_label=progress_label,
             progress_interval_sec=progress_interval_sec,
         )
@@ -284,6 +288,7 @@ def _run_ffmpeg_with_progress(
     progress_reference_path: str,
     progress_label: str,
     progress_interval_sec: float,
+    progress_reference_bytes: Optional[int] = None,
 ) -> EncodeResult:
     started = time.monotonic()
     last_progress = 0.0
@@ -312,7 +317,7 @@ def _run_ffmpeg_with_progress(
                 if os.path.isfile(output_path):
                     log(
                         f"  {progress_label} … {elapsed:.0f}s "
-                        f"{format_compression(progress_reference_path, output_path)}"
+                        f"{format_compression(progress_reference_path, output_path, reference_bytes=progress_reference_bytes)}"
                     )
             time.sleep(1.0)
         if proc.stderr is not None:
@@ -326,7 +331,7 @@ def _run_ffmpeg_with_progress(
     if ok:
         log(
             f"  {progress_label} encode done {elapsed:.1f}s "
-            f"{format_compression(progress_reference_path, output_path)}"
+            f"{format_compression(progress_reference_path, output_path, reference_bytes=progress_reference_bytes)}"
         )
     return EncodeResult(
         ok=ok,
@@ -354,6 +359,7 @@ def _encode_libx265(
     libx265_profile: Optional[str] = None,
     twopass: bool = False,
     progress_reference_path: Optional[str] = None,
+    progress_reference_bytes: Optional[int] = None,
     progress_label: Optional[str] = None,
     progress_interval_sec: float = 15.0,
 ) -> EncodeResult:
@@ -422,6 +428,7 @@ def _encode_libx265(
             output_path,
             timeout,
             progress_reference_path=progress_reference_path,
+            progress_reference_bytes=progress_reference_bytes,
             progress_label=progress_label,
             progress_interval_sec=progress_interval_sec,
         )
@@ -436,6 +443,7 @@ def _encode_libx265(
         "/dev/null",
         timeout,
         progress_reference_path=progress_reference_path,
+        progress_reference_bytes=progress_reference_bytes,
         progress_label=label1,
         progress_interval_sec=progress_interval_sec,
     )
@@ -448,6 +456,7 @@ def _encode_libx265(
         output_path,
         timeout,
         progress_reference_path=progress_reference_path,
+        progress_reference_bytes=progress_reference_bytes,
         progress_label=label2,
         progress_interval_sec=progress_interval_sec,
     )
@@ -479,6 +488,7 @@ def _encode_hevc_nvenc(
     nvenc_gpu: int,
     nvenc_hwaccel: bool,
     progress_reference_path: Optional[str] = None,
+    progress_reference_bytes: Optional[int] = None,
     progress_label: Optional[str] = None,
     progress_interval_sec: float = 15.0,
 ) -> EncodeResult:
@@ -595,6 +605,7 @@ def _encode_hevc_nvenc(
         output_path,
         timeout,
         progress_reference_path=progress_reference_path,
+        progress_reference_bytes=progress_reference_bytes,
         progress_label=progress_label,
         progress_interval_sec=progress_interval_sec,
     )

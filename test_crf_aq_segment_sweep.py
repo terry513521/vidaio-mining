@@ -33,6 +33,7 @@ from typing import Any, Optional
 from extract_video_features import extract_features
 from ffmpeg_tools import resolve_binary
 from encoder import encode_hevc
+from compress_util import measure_compression
 from interp_search import format_x265_params, parse_x265_params, propose_feature_x265_params
 from scoring import ScoreResult, score_candidate
 from test_crf_aq_sweep import (
@@ -47,15 +48,181 @@ from test_crf_aq_sweep import (
 )
 
 
+def _source_segment_packet_bytes(
+    source: Path,
+    segments: list[dict[str, Any]],
+    *,
+    ffprobe_bin: Optional[str] = None,
+) -> dict[int, int]:
+    """Sum source video packet bytes per segment (competition-aligned size-in).
+
+    Matches ``test_zones_zonefile_score._zone_packet_bytes`` / ``_attach_zone_compression``.
+    Do NOT use lossless VMAF ref file sizes — those inflate compression_ratio ~8–9×.
+    """
+    probe = resolve_binary("ffprobe", ffprobe_bin)
+    proc = subprocess.run(
+        [
+            probe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "packet=pts_time,size",
+            "-of",
+            "csv=p=0",
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe packets failed: {(proc.stderr or '')[-500:]}")
+
+    fps_proc = subprocess.run(
+        [
+            probe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=r_frame_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    rate = (fps_proc.stdout or "30/1").strip() or "30/1"
+    if "/" in rate:
+        num, den = rate.split("/", 1)
+        fps = float(num) / max(1e-9, float(den))
+    else:
+        fps = float(rate)
+
+    pkt_sizes: list[tuple[int, int]] = []
+    for line in (proc.stdout or "").splitlines():
+        parts = line.strip().split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            t = float(parts[0])
+            sz = int(float(parts[1]))
+        except ValueError:
+            continue
+        pkt_sizes.append((int(round(t * fps)), sz))
+
+    out: dict[int, int] = {}
+    for seg in segments:
+        sf = int(seg["start_frame"])
+        ef = int(seg["end_frame"])
+        total = sum(sz for fi, sz in pkt_sizes if sf <= fi < ef)
+        out[int(seg["index"])] = int(total)
+    return out
+
+
+def _workspace_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _normalize_feature_payload(data: dict[str, Any], *, source: Path) -> dict[str, Any]:
+    """Accept extract_video_features JSON or segmented-videos manifest.json."""
+    segs = data.get("segments")
+    if not isinstance(segs, list) or not segs:
+        raise SystemExit(f"features have no segments[]: {source}")
+
+    # Already full extractor format
+    if isinstance(data.get("meta"), dict) or "summary_raw" in data or "global" in data:
+        return data
+
+    # segmented videos/<stem>/manifest.json (or features.json with frame bounds)
+    first = segs[0] if isinstance(segs[0], dict) else {}
+    if "start_frame" in first or "start_sec" in first:
+        # Infer meta from segment extents when possible
+        end_f = max(int(s.get("end_frame") or 0) for s in segs if isinstance(s, dict))
+        end_sec = max(float(s.get("end_sec") or 0.0) for s in segs if isinstance(s, dict))
+        fps = 30.0
+        if end_sec > 0 and end_f > 0:
+            fps = float(end_f) / end_sec
+        return {
+            "video": data.get("video_stem") or source.stem,
+            "path": data.get("source_video") or "",
+            "meta": {
+                "fps": fps,
+                "frame_count": end_f,
+                "duration": end_sec,
+            },
+            "global": {},
+            "segments": segs,
+            "feature_source": str(source),
+        }
+
+    raise SystemExit(f"unrecognized features schema: {source}")
+
+
+def _feature_cache_candidates(
+    input_path: Path,
+    *,
+    features_dir: Path,
+    features_arg: str = "",
+) -> list[Path]:
+    stem = input_path.stem
+    cands: list[Path] = []
+    if features_arg:
+        cands.append(Path(features_arg))
+    cands.extend(
+        [
+            features_dir / f"{stem}.json",
+            Path("video_features") / f"{stem}.json",
+            ROOT.parent / "segmented videos" / stem / "manifest.json"
+            if (ROOT := Path(__file__).resolve().parent)
+            else Path(),
+            _workspace_root() / "segmented videos" / stem / "manifest.json",
+            Path("..") / "segmented videos" / stem / "manifest.json",
+            Path("../segmented videos") / stem / "features.json",
+            _workspace_root() / "segmented videos" / stem / "features.json",
+        ]
+    )
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    out: list[Path] = []
+    for p in cands:
+        key = str(p.resolve()) if p.exists() else str(p)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(p)
+    return out
+
+
 def _resolve_features(args: argparse.Namespace, input_path: Path) -> dict[str, Any]:
     features_dir = Path(args.features_dir)
-    if args.features or args.use_cached_features:
-        path = Path(args.features) if args.features else features_dir / f"{input_path.stem}.json"
-        if not path.is_file():
-            raise SystemExit(f"features not found: {path}")
-        print(f"features   : cached {path}", flush=True)
-        return json.loads(path.read_text(encoding="utf-8"))
-    print(f"features   : re-extracting from {input_path} …", flush=True)
+    want_cache = bool(args.features or args.use_cached_features)
+
+    if want_cache:
+        for path in _feature_cache_candidates(
+            input_path,
+            features_dir=features_dir,
+            features_arg=str(args.features or ""),
+        ):
+            if not path.is_file():
+                continue
+            print(f"features   : cached {path}", flush=True)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return _normalize_feature_payload(raw, source=path)
+        if args.features:
+            raise SystemExit(f"features not found: {args.features}")
+        print(
+            "features   : cache miss "
+            f"(looked under {features_dir}/ and segmented videos/); "
+            "re-extracting …",
+            flush=True,
+        )
+    else:
+        print(f"features   : re-extracting from {input_path} …", flush=True)
+
     t0 = time.monotonic()
     data = extract_features(input_path)
     print(
@@ -84,14 +251,20 @@ def _segments_from_features(feat: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         start_sec = float(seg.get("start_sec", 0.0) or 0.0)
         end_sec = float(seg.get("end_sec", start_sec) or start_sec)
-        start_f = int(round(start_sec * fps))
-        end_f = int(round(end_sec * fps))
+        # Prefer explicit frame bounds (segmented-videos manifest)
+        if "start_frame" in seg and "end_frame" in seg:
+            start_f = int(seg["start_frame"])
+            end_f = int(seg["end_frame"])
+        else:
+            start_f = int(round(start_sec * fps))
+            end_f = int(round(end_sec * fps))
         if frame_count > 0:
             start_f = max(0, min(start_f, frame_count))
             end_f = max(start_f + 1, min(end_f, frame_count))
         else:
             start_f = max(0, start_f)
             end_f = max(start_f + 1, end_f)
+        feats = seg.get("features") if isinstance(seg.get("features"), dict) else {}
         out.append(
             {
                 "index": int(seg.get("index", i)),
@@ -104,7 +277,20 @@ def _segments_from_features(feat: dict[str, Any]) -> list[dict[str, Any]]:
                 "motion": float(seg.get("motion", 0.0) or 0.0),
                 "texture": float(seg.get("texture", 0.0) or 0.0),
                 "edge": float(seg.get("edge", 0.0) or 0.0),
-                "noise": float(seg.get("noise", 0.0) or 0.0),
+                "noise": float(
+                    seg.get("noise", feats.get("noise", 0.0)) or 0.0
+                ),
+                "si": float(seg.get("si", feats.get("si", 0.0)) or 0.0),
+                "ti": float(seg.get("ti", feats.get("ti", 0.0)) or 0.0),
+                "flatness": float(
+                    seg.get("flatness", feats.get("flatness", 0.0)) or 0.0
+                ),
+                "luma_mean": float(
+                    seg.get("luma_mean", feats.get("luma_mean", 0.0)) or 0.0
+                ),
+                "sat_mean": float(
+                    seg.get("sat_mean", feats.get("sat_mean", 0.0)) or 0.0
+                ),
             }
         )
     if not out:
@@ -257,11 +443,17 @@ def _run_one_segment(
     gpu_device: int,
     keep_encode: bool,
     ffmpeg_bin: str,
+    source_segment_bytes: int,
 ) -> TrialResult:
-    """Encode segment from full source (ss/t), score VMAF vs segment ref trim."""
+    """Encode segment from full source (ss/t), score VMAF vs segment ref trim.
+
+    Compression uses **source packet bytes** for this segment (competition formula),
+    not the lossless VMAF reference file size.
+    """
     _ensure_segment_ref(source_path, ref_path, seg, ffmpeg_bin=ffmpeg_bin)
     start_sec = float(seg["start_sec"])
     duration = max(0.01, float(seg["end_sec"]) - start_sec)
+    src_bytes = max(0, int(source_segment_bytes))
 
     params = dict(base_params)
     params["aq-strength"] = f"{round(float(aq), 3):g}"
@@ -281,6 +473,7 @@ def _run_one_segment(
         ss=start_sec,
         t=duration,
         progress_reference_path=str(ref_path),
+        progress_reference_bytes=src_bytes if src_bytes > 0 else None,
         progress_label=f"seg{seg['index']} CRF{crf}/aq{aq:.1f}",
     )
     encode_sec = time.monotonic() - t0
@@ -309,6 +502,17 @@ def _run_one_segment(
         )
 
     t1 = time.monotonic()
+    size_out = out_path.stat().st_size if out_path.is_file() else 0
+    # Competition: rate = out/in, ratio = in/out using SOURCE segment bytes.
+    if src_bytes > 0:
+        rate, _ratio = measure_compression(
+            str(ref_path),
+            str(out_path),
+            reference_bytes=src_bytes,
+        )
+        rate_override: Optional[float] = float(rate)
+    else:
+        rate_override = None
 
     def _score() -> ScoreResult:
         return score_candidate(
@@ -323,6 +527,7 @@ def _run_one_segment(
             vmaf_gpu_device=gpu_device if use_gpu else None,
             vmaf_gpu_prefer=bool(use_gpu),
             codec_mode="RC",
+            compression_rate_override=rate_override,
         )
 
     if use_gpu:
@@ -332,7 +537,6 @@ def _run_one_segment(
         score = _score()
     score_sec = time.monotonic() - t1
 
-    size_out = out_path.stat().st_size if out_path.is_file() else 0
     if not keep_encode and out_path.is_file():
         try:
             out_path.unlink()
@@ -485,6 +689,17 @@ def main() -> int:
 
     ffmpeg_bin = resolve_binary("ffmpeg", None)
 
+    print("source_bytes: probing packet sizes per segment …", flush=True)
+    source_bytes_by_seg = _source_segment_packet_bytes(input_path, segments)
+    for seg in segments:
+        idx = int(seg["index"])
+        sb = int(source_bytes_by_seg.get(idx, 0))
+        print(
+            f"  seg[{idx}] frames={seg['start_frame']}-{seg['end_frame']}  "
+            f"source_pkt={sb / 1e6:.2f}MB",
+            flush=True,
+        )
+
     print("=" * 88)
     print(f"input      : {input_path}")
     print(f"work_dir   : {work_dir}")
@@ -500,6 +715,7 @@ def main() -> int:
         f"vmaf       : thr={args.vmaf_threshold} backend={'GPU' if args.gpu else 'CPU'} "
         f"threads/job={vmaf_n_threads}"
     )
+    print("comp_ratio : source packet bytes / encoded size (competition formula)")
     print("=" * 88)
 
     # Build job list grouped by segment.
@@ -566,6 +782,9 @@ def main() -> int:
                 gpu_device=args.gpu_device,
                 keep_encode=bool(args.keep_encodes),
                 ffmpeg_bin=ffmpeg_bin,
+                source_segment_bytes=int(
+                    source_bytes_by_seg.get(int(seg["index"]), 0)
+                ),
             )
             row = _trial_to_segment_row(seg, trial)
             csv_path = trials_path.parent / "results.csv"

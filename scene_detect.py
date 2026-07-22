@@ -1,12 +1,14 @@
-"""Scene detection via pyscenedetect (AdaptiveDetector)."""
+"""Scene detection via PySceneDetect (ContentDetector / AdaptiveDetector)."""
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from logutil import log
+
+DetectorName = Literal["content", "adaptive"]
 
 
 @dataclass(frozen=True)
@@ -34,24 +36,42 @@ class SceneDetectResult:
     scenes: list[SceneSpan]
     detect_sec: float = 0.0
     error: str = ""
+    detector: str = ""
+
+    @property
+    def spans(self) -> list[tuple[float, float]]:
+        """``(start_sec, end_sec)`` tuples for ``HEVCFeatureExtractor(scene_spans=…)``."""
+        return [(s.start_sec, s.end_sec) for s in self.scenes]
 
 
 def detect_scenes(
     video_path: str,
     *,
-    downscale: int = 1,
+    detector: DetectorName = "content",
+    threshold: Optional[float] = None,
     min_scene_len_sec: float = 0.4,
+    downscale: int = 1,
 ) -> SceneDetectResult:
-    """Return scene spans in seconds. Falls back to one full-span scene on failure."""
+    """Detect scene spans with PySceneDetect.
+
+    Defaults to ``ContentDetector`` (HSV/content-change cuts), which is the
+    usual choice for hard-cut mashups. ``adaptive`` uses ``AdaptiveDetector``.
+    """
     started = time.monotonic()
     try:
-        from scenedetect import AdaptiveDetector, SceneManager, open_video
+        from scenedetect import (
+            AdaptiveDetector,
+            ContentDetector,
+            SceneManager,
+            open_video,
+        )
     except ImportError as exc:
         return SceneDetectResult(
             ok=False,
             scenes=[],
             detect_sec=time.monotonic() - started,
             error=f"scenedetect not installed: {exc}",
+            detector=detector,
         )
 
     video_to_detect = video_path
@@ -63,8 +83,26 @@ def detect_scenes(
                 video_to_detect = temp_downscaled
 
         video = open_video(video_to_detect)
+        fps = float(getattr(video, "frame_rate", None) or 30.0)
+        min_len_frames = max(1, int(round(float(min_scene_len_sec) * max(fps, 1e-6))))
+
         manager = SceneManager()
-        manager.add_detector(AdaptiveDetector(min_scene_len=int(min_scene_len_sec * 30)))
+        det_name = str(detector or "content").lower().strip()
+        if det_name in {"adaptive", "adapt"}:
+            # AdaptiveDetector: threshold is optional; use library default if None.
+            kwargs: dict[str, Any] = {"min_scene_len": min_len_frames}
+            if threshold is not None:
+                kwargs["adaptive_threshold"] = float(threshold)
+            manager.add_detector(AdaptiveDetector(**kwargs))
+            det_name = "adaptive"
+        else:
+            # ContentDetector: default threshold 27 works well for hard cuts.
+            thr = 27.0 if threshold is None else float(threshold)
+            manager.add_detector(
+                ContentDetector(threshold=thr, min_scene_len=min_len_frames)
+            )
+            det_name = "content"
+
         manager.detect_scenes(video=video)
         scene_list = manager.get_scene_list()
         spans = [
@@ -77,11 +115,15 @@ def detect_scenes(
         ]
         if not spans:
             spans = [_whole_file_span(video_path)]
-        log(f"  scenedetect: {len(spans)} scene(s) in {time.monotonic() - started:.1f}s")
+        log(
+            f"  scenedetect[{det_name}]: {len(spans)} scene(s) "
+            f"in {time.monotonic() - started:.1f}s"
+        )
         return SceneDetectResult(
             ok=True,
             scenes=spans,
             detect_sec=time.monotonic() - started,
+            detector=det_name,
         )
     except Exception as exc:  # noqa: BLE001
         log(f"  scenedetect failed: {exc}")
@@ -90,6 +132,7 @@ def detect_scenes(
             scenes=[_whole_file_span(video_path)],
             detect_sec=time.monotonic() - started,
             error=str(exc),
+            detector=str(detector),
         )
     finally:
         if temp_downscaled:

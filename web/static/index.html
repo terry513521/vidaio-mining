@@ -24,7 +24,126 @@
       color: var(--text);
       min-height: 100vh;
     }
-    .wrap { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .video-sidebar {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: rgba(15, 20, 25, 0.92);
+      border-right: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }
+    .video-sidebar-head {
+      padding: 16px 14px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .video-sidebar-head h2 {
+      margin: 0;
+      font-size: 0.95rem;
+    }
+    .video-sidebar-meta {
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-top: 4px;
+    }
+    .video-sidebar-search {
+      width: 100%;
+      margin-top: 10px;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+    }
+    .video-sidebar-list {
+      overflow-y: auto;
+      padding: 10px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .video-thumb {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px;
+      cursor: pointer;
+      color: inherit;
+    }
+    .video-thumb:hover { border-color: var(--accent); }
+    .video-thumb.active {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(77, 163, 255, 0.35);
+    }
+    .video-thumb video,
+    .video-thumb .thumb-img,
+    .video-thumb .thumb-placeholder {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border-radius: 8px;
+      background: #111;
+      display: block;
+      object-fit: cover;
+      pointer-events: none;
+    }
+    .video-thumb .thumb-img {
+      background: #1a1f26;
+    }
+    .video-thumb .thumb-placeholder {
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 0.75rem;
+      border: 1px dashed var(--border);
+    }
+    .video-thumb .thumb-name {
+      margin-top: 8px;
+      font-size: 0.74rem;
+      line-height: 1.3;
+      word-break: break-all;
+      color: var(--text);
+    }
+    .video-thumb .thumb-meta {
+      margin-top: 4px;
+      font-size: 0.7rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .video-thumb .thumb-tag.ok { color: var(--good); }
+    .video-thumb .thumb-tag.muted { color: var(--muted); }
+    .wrap {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 24px;
+      min-width: 0;
+    }
+    @media (max-width: 980px) {
+      .app-shell { grid-template-columns: 1fr; }
+      .video-sidebar {
+        position: relative;
+        height: auto;
+        max-height: 320px;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+      }
+      .video-sidebar-list {
+        grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      }
+    }
     header {
       display: flex; justify-content: space-between; align-items: center;
       gap: 16px; margin-bottom: 24px;
@@ -73,23 +192,342 @@
       padding: 10px 14px;
       font-size: 0.95rem;
     }
-    select { min-width: 360px; max-width: 100%; flex: 1; }
+    select { min-width: 220px; max-width: 100%; }
+    .controls .current-video {
+      flex: 1;
+      min-width: 180px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 0.9rem;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #analyze-video-btn {
+      background: linear-gradient(180deg, #2a6fbf, #1d5aa0);
+      border-color: #4da3ff;
+      font-weight: 600;
+    }
+    #analyze-video-btn:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .analyze-video-status {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin: -8px 0 16px;
+      min-height: 1.2em;
+    }
+    .analyze-video-status.running { color: var(--accent); }
+    .analyze-video-status.done { color: var(--good); }
+    .analyze-video-status.error { color: var(--warn); }
+    .segments-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-top: 16px;
+    }
+    .segments-panel-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .segments-panel h2 {
+      margin: 0 0 4px;
+      font-size: 1.05rem;
+    }
+    .seg-action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .seg-action-row button {
+      font-size: 0.82rem;
+      padding: 7px 12px;
+    }
+    #seg-ml-candidate-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    #seg-feature-btn {
+      background: linear-gradient(180deg, #2a6fbf, #1d5aa0);
+      border-color: #4da3ff;
+    }
+    #seg-compress-btn {
+      background: linear-gradient(180deg, #2f8f5b, #1f6b42);
+      border-color: #4ecf8a;
+    }
+    .seg-action-status {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 8px 0 4px;
+      min-height: 1.2em;
+      text-align: right;
+    }
+    .seg-action-status.running { color: var(--accent); }
+    .seg-action-status.done { color: var(--good); }
+    .seg-action-status.error { color: var(--warn); }
+    .segments-blocks {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 12px;
+    }
+    .segment-block {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      display: grid;
+      grid-template-columns: minmax(200px, 280px) 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 800px) {
+      .segment-block { grid-template-columns: 1fr; }
+    }
+    .segment-block .seg-preview video,
+    .segment-block .seg-preview .seg-empty {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border-radius: 8px;
+      background: #000;
+      object-fit: contain;
+    }
+    .segment-block .seg-preview .seg-empty {
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      border: 1px dashed var(--border);
+      font-size: 0.8rem;
+    }
+    .segment-block .seg-title {
+      margin: 8px 0 0;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+    .segment-block .seg-section {
+      margin-bottom: 10px;
+    }
+    .segment-block .seg-section:last-child { margin-bottom: 0; }
+    .segment-block .seg-section-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .segment-block .seg-pills,
+    .segment-block .seg-features,
+    .seg-result-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .segment-block .seg-features {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      gap: 4px 8px;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .segment-block .seg-features span strong {
+      color: var(--text);
+      font-weight: 600;
+    }
+    .segment-block .seg-pill,
+    .seg-result-pills .seg-pill,
+    .video-features-bar .seg-pill {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .segment-block .seg-pill strong,
+    .seg-result-pills .seg-pill strong,
+    .video-features-bar .seg-pill strong { color: var(--text); }
+    .seg-param-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .seg-param-grid label {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .seg-param-grid input,
+    .seg-param-grid textarea {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 8px;
+      font-size: 0.82rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      width: 100%;
+    }
+    .seg-param-grid label.wide { grid-column: 1 / -1; }
+    .seg-param-grid textarea {
+      min-height: 0;
+      overflow: hidden;
+      resize: none;
+      field-sizing: content;
+      line-height: 1.35;
+    }
+    .seg-param-results {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .seg-param-results video {
+      width: 100%;
+      max-width: 420px;
+      aspect-ratio: 16 / 9;
+      border-radius: 8px;
+      background: #000;
+      object-fit: contain;
+    }
+    .seg-param-results .seg-result-empty {
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+    .video-features-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 10px 0 4px;
+    }
+    .video-features-bar .seg-pill {
+      background: var(--panel-2);
+      padding: 4px 10px;
+      font-size: 0.78rem;
+    }
+    .full-encode-result {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+    }
+    .full-encode-result.hidden { display: none !important; }
+    .full-encode-result h2 {
+      margin: 0 0 10px;
+      font-size: 1.05rem;
+    }
+    .full-encode-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 900px) {
+      .full-encode-grid { grid-template-columns: 1fr; }
+    }
+    .full-encode-card {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px;
+    }
+    .full-encode-card h3 {
+      margin: 0 0 8px;
+      font-size: 0.92rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .full-encode-card h3 .sub {
+      font-weight: 400;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+    .full-encode-card video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      border-radius: 8px;
+      background: #000;
+      object-fit: contain;
+    }
+    .full-encode-card .seg-result-pills {
+      margin-top: 8px;
+    }
+    .feature-analysis-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-top: 16px;
+    }
+    .feature-analysis-panel h2 {
+      margin: 0 0 4px;
+      font-size: 1.05rem;
+    }
+    .feature-analysis-wrap {
+      overflow-x: auto;
+      margin-top: 12px;
+    }
+    #feature-analysis-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    #feature-analysis-table th,
+    #feature-analysis-table td {
+      border-bottom: 1px solid var(--border);
+      padding: 8px 10px;
+      text-align: left;
+      white-space: nowrap;
+    }
+    #feature-analysis-table th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    #feature-analysis-table td.num {
+      font-variant-numeric: tabular-nums;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    #feature-analysis-table tr:hover td {
+      background: var(--panel-2);
+    }
+    #feature-analysis-empty {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 10px;
+    }
+    #feature-analysis-chart {
+      width: 100%;
+      min-height: 320px;
+      margin-top: 14px;
+    }
+    #feature-analysis-chart.hidden { display: none !important; }
+    #feature-analysis-table td.hi {
+      color: var(--good);
+      font-weight: 600;
+    }
+    #feature-analysis-table td.lo {
+      color: var(--warn);
+      font-weight: 600;
+    }
     button, a.btn {
       cursor: pointer; text-decoration: none; display: inline-block;
     }
     button:hover, a.btn:hover { border-color: var(--accent); }
-    .stats {
-      display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px;
-    }
-    .pill {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 999px;
-      padding: 6px 12px;
-      font-size: 0.85rem;
-      color: var(--muted);
-    }
-    .pill strong { color: var(--text); }
     .players {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -122,14 +560,6 @@
       text-align: center;
       border: 1px dashed var(--border);
       border-radius: 10px;
-    }
-    .gpu-list { display: grid; gap: 8px; margin-top: 8px; }
-    .gpu-item {
-      font-size: 0.85rem;
-      color: var(--muted);
-      padding: 8px 10px;
-      background: var(--panel-2);
-      border-radius: 8px;
     }
     footer {
       margin-top: 24px;
@@ -164,24 +594,6 @@
       color: var(--muted);
       font-size: 0.9rem;
     }
-    .compress-panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 14px 16px;
-      margin-bottom: 16px;
-    }
-    .compress-panel h2 {
-      margin: 0 0 4px;
-      font-size: 1rem;
-    }
-    .compress-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
-      align-items: flex-end;
-      margin-top: 12px;
-    }
     .field {
       display: flex;
       flex-direction: column;
@@ -204,53 +616,6 @@
       padding: 10px 12px;
       font-size: 0.95rem;
       min-width: 0;
-    }
-    .video-pick {
-      margin-top: 14px;
-      border-top: 1px solid var(--border);
-      padding-top: 14px;
-    }
-    .video-pick-toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      align-items: center;
-      margin-bottom: 10px;
-    }
-    .video-checklist {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      gap: 8px;
-      max-height: 180px;
-      overflow: auto;
-      padding: 8px;
-      background: var(--panel-2);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-    }
-    .video-checklist label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 0.85rem;
-      color: var(--muted);
-      cursor: pointer;
-    }
-    .compress-status {
-      margin-top: 12px;
-      color: var(--muted);
-      font-size: 0.9rem;
-    }
-    .compress-status.running { color: var(--accent); }
-    .compress-status.done { color: var(--good); }
-    .compress-status.error { color: var(--warn); }
-    .compress-status.stopped { color: var(--warn); }
-    button.btn-stop {
-      border-color: var(--warn);
-      color: var(--warn);
-    }
-    button.btn-stop:hover:not(:disabled) {
-      background: rgba(255, 120, 80, 0.12);
     }
     .compress-terminal {
       margin-top: 12px;
@@ -278,23 +643,6 @@
       color: var(--muted);
     }
     .hidden { display: none !important; }
-    .encode-settings {
-      margin-top: 14px;
-      border-top: 1px solid var(--border);
-      padding-top: 14px;
-    }
-    .encode-settings summary {
-      cursor: pointer;
-      font-weight: 600;
-      color: var(--text);
-      margin-bottom: 10px;
-    }
-    .encode-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-      gap: 12px;
-      margin-bottom: 12px;
-    }
     .analyze-panel {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -378,8 +726,6 @@
       font-size: 0.8rem;
       resize: vertical;
     }
-    .pill.err strong { color: var(--warn); }
-    .pill.wide { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .field-wide {
       grid-column: 1 / -1;
     }
@@ -400,15 +746,99 @@
       opacity: 0.85;
       cursor: default;
     }
-    .pill.wide {
-      max-width: 100%;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .grid-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 20px;
+    }
+    .grid-panel h2 { margin: 0 0 6px; font-size: 1.05rem; }
+    .grid-panel .grid-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: end;
+      margin: 12px 0;
+    }
+    .grid-panel .field label {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .grid-panel select, .grid-panel button {
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 0.85rem;
+    }
+    .grid-panel button { cursor: pointer; }
+    .grid-panel button:hover { border-color: var(--accent); }
+    .grid-best {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+      margin: 10px 0 14px;
+    }
+    .grid-best .stat {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    .grid-best .stat .label { color: var(--muted); font-size: 0.72rem; }
+    .grid-best .stat .value { font-size: 1.05rem; margin-top: 4px; color: var(--accent); }
+    #segment-grid-plots {
+      width: 100%;
+      min-height: 280px;
+    }
+    .grid-trials-wrap {
+      max-height: 280px;
+      overflow: auto;
+      margin-top: 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    .grid-trials-wrap table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.75rem;
+    }
+    .grid-trials-wrap th, .grid-trials-wrap td {
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border);
+      text-align: left;
       white-space: nowrap;
     }
+    .grid-trials-wrap th {
+      color: var(--muted);
+      position: sticky;
+      top: 0;
+      background: var(--panel);
+    }
   </style>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 </head>
 <body>
+  <div class="app-shell">
+    <aside class="video-sidebar" aria-label="Video previews">
+      <div class="video-sidebar-head">
+        <h2>All videos</h2>
+        <div class="video-sidebar-meta" id="sidebar-video-count">Loading…</div>
+        <input
+          id="sidebar-video-search"
+          class="video-sidebar-search"
+          type="search"
+          placeholder="Filter by name…"
+          autocomplete="off"
+        />
+      </div>
+      <div class="video-sidebar-list" id="video-sidebar-list"></div>
+    </aside>
+
   <div class="wrap">
     <header>
       <div>
@@ -423,17 +853,12 @@
       <div class="card"><h3>Memory</h3><div class="metric" id="mem-metric">—</div><div class="bar"><span id="mem-bar"></span></div></div>
       <div class="card"><h3>Disk</h3><div class="metric" id="disk-metric">—</div><div class="bar warn"><span id="disk-bar"></span></div></div>
       <div class="card"><h3>Load Avg</h3><div class="metric" id="load-metric">—</div><div class="sub" id="cpu-count">—</div></div>
-      <div class="card" style="grid-column: span 2;">
-        <h3>GPU</h3>
-        <div id="gpu-metric" class="metric">—</div>
-        <div class="gpu-list" id="gpu-list"></div>
-      </div>
     </section>
 
     <section class="fetch-panel">
       <div>
         <strong>Challenge videos</strong>
-        <div class="sub">Auto-discover the <strong>latest</strong> validator output.log from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB workspace</a> and download challenge videos</div>
+        <div class="sub">Auto-discover the <strong>latest</strong> validator output.log from <a href="https://wandb.ai/vidaio_vidaio/sn85-validators/workspace" target="_blank" rel="noopener">WandB workspace</a> and download challenge videos to <code>workspace/raw videos</code></div>
       </div>
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <button id="fetch-challenges" type="button">Fetch from WandB</button>
@@ -508,158 +933,59 @@
       <div class="analyze-results" id="analyze-results"></div>
     </section>
 
-    <section class="compress-panel">
-      <h2>Compress videos</h2>
-      <div class="sub">Run fleet compression on selected challenge videos</div>
-      <div class="compress-row">
-        <div class="field">
-          <label for="codec-mode">Codec mode</label>
-          <select id="codec-mode">
-            <option value="crf" selected>crf</option>
-            <option value="vbr">vbr</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="vmaf-threshold">VMAF threshold</label>
-          <select id="vmaf-threshold">
-            <option value="85">85</option>
-            <option value="89" selected>89</option>
-            <option value="93">93</option>
-          </select>
-        </div>
-        <div class="field hidden" id="target-bitrate-field">
-          <label for="target-bitrate">Target bitrate</label>
-          <input id="target-bitrate" type="text" placeholder="e.g. 7.8M" value="" />
-        </div>
-        <div class="field hidden" id="target-rate-field">
-          <label for="target-compression-rate">Target compression rate</label>
-          <input id="target-compression-rate" type="number" step="0.001" min="0" max="1" placeholder="e.g. 0.04" value="" />
-        </div>
-        <div class="field">
-          <label for="select-count">Select count</label>
-          <select id="select-count">
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="4">4</option>
-            <option value="5" selected>5</option>
-            <option value="10">10</option>
-          </select>
-        </div>
-        <button id="select-videos" type="button">Select videos</button>
-        <button id="compress-btn" type="button">Compress</button>
-        <button id="compress-stop-btn" type="button" class="btn-stop hidden">Stop</button>
+    <section class="grid-panel" id="segment-grid-panel">
+      <h2>Segment CRF × AQ results (3D)</h2>
+      <div class="sub">
+        Grid + adaptive sweeps merged per video
+        (<code>work/segment_crf_aq_grid</code> +
+        <code>work/segment_crf_aq_adaptive</code>)
       </div>
-      <details class="encode-settings" open>
-        <summary>Encode settings</summary>
-        <div class="encode-grid">
-          <div class="field">
-            <label for="encoder">Encoder</label>
-            <select id="encoder">
-              <option value="libx265">libx265</option>
-              <option value="hevc_nvenc">hevc_nvenc</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="preset">Preset</label>
-            <select id="preset"></select>
-          </div>
-          <div class="field libx265-only">
-            <label for="libx265-profile">Profile</label>
-            <select id="libx265-profile">
-              <option value="main">main</option>
-              <option value="main10">main10</option>
-              <option value="mainstillpicture">mainstillpicture</option>
-              <option value="rext">rext</option>
-            </select>
-          </div>
-          <div class="field">
-            <label for="crf-min">CRF min</label>
-            <input id="crf-min" type="number" min="0" max="51" />
-          </div>
-          <div class="field">
-            <label for="crf-max">CRF max</label>
-            <input id="crf-max" type="number" min="0" max="51" />
-          </div>
-          <div class="field">
-            <label for="crf-candidates">CRF candidates</label>
-            <input id="crf-candidates" type="number" min="1" max="10" />
-          </div>
-          <div class="field">
-            <label for="crf-spread">CRF spread</label>
-            <input id="crf-spread" type="number" min="1" max="10" />
-          </div>
-          <div class="field">
-            <label for="vmaf-n-threads">VMAF threads</label>
-            <input id="vmaf-n-threads" type="number" min="1" max="64" value="10" />
-          </div>
-          <div class="field nvenc-only hidden">
-            <label for="nvenc-rc">NVENC RC</label>
-            <select id="nvenc-rc">
-              <option value="vbr">vbr</option>
-              <option value="vbr_hq">vbr_hq</option>
-              <option value="cbr">cbr</option>
-              <option value="cbr_hq">cbr_hq</option>
-              <option value="constqp">constqp</option>
-            </select>
-          </div>
-          <div class="field nvenc-only hidden">
-            <label for="nvenc-multipass">NVENC multipass</label>
-            <select id="nvenc-multipass">
-              <option value="disabled">disabled</option>
-              <option value="qres">qres</option>
-              <option value="fullres">fullres</option>
-            </select>
-          </div>
-          <div class="field">
-            <label class="check" style="margin-top:22px;">
-              <input id="libx265-feature-baseline" type="checkbox" />
-              Feature x265 baseline
-            </label>
-          </div>
-          <div class="field">
-            <label class="check" style="margin-top:22px;">
-              <input id="run-no-preprocess" type="checkbox" checked />
-              No preprocess
-            </label>
-          </div>
-          <div class="field">
-            <label class="check" style="margin-top:22px;">
-              <input id="run-full-video" type="checkbox" checked />
-              Full video
-            </label>
-          </div>
+      <div class="grid-row">
+        <div class="field">
+          <label for="grid-video">Video</label>
+          <select id="grid-video"><option value="">Loading…</option></select>
         </div>
-        <div class="field field-wide libx265-only">
-          <label for="libx265-params">x265-params (colon-separated)</label>
-          <textarea id="libx265-params" rows="3" placeholder="aq-mode=2:aq-strength=1:rd=6:ref=6:bframes=8:rc-lookahead=50:keyint=60:min-keyint=1:scenecut=50"></textarea>
+        <div class="field">
+          <label for="grid-segment">Segment</label>
+          <select id="grid-segment"><option value="">—</option></select>
         </div>
-      </details>
-      <div class="video-pick">
-        <div class="video-pick-toolbar">
-          <span class="sub" id="selected-count">0 selected</span>
-        </div>
-        <div class="video-checklist" id="video-checklist"></div>
+        <label class="check" style="padding-bottom:8px;">
+          <input id="grid-gates-only" type="checkbox" /> Gates only
+        </label>
+        <button id="grid-refresh" type="button">Refresh</button>
+        <button id="grid-load" type="button">Show 3D</button>
       </div>
-      <div class="compress-status" id="compress-status">Ready</div>
-      <div id="compress-terminal-wrap" class="hidden">
-        <div class="compress-terminal-header">
-          <span>Compression log</span>
-          <span id="compress-terminal-meta"></span>
-        </div>
-        <pre id="compress-terminal" class="compress-terminal"></pre>
+      <div class="sub" id="grid-status">Select a video with grid results</div>
+      <div class="grid-best" id="grid-best"></div>
+      <div id="segment-grid-plots"></div>
+      <div class="grid-trials-wrap hidden" id="grid-trials-wrap">
+        <table id="grid-trials-table">
+          <thead>
+            <tr>
+              <th>CRF</th><th>AQ</th><th>s_f</th><th>vmaf_neg</th><th>vmaf_base</th>
+              <th>rate</th><th>ratio</th><th>gates</th><th>reason</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
     <section class="controls">
-      <select id="video-select"><option value="">Loading videos…</option></select>
+      <div class="current-video" id="current-video-label">No video selected</div>
+      <button id="analyze-video-btn" type="button">Analyze</button>
       <button id="sync-play" type="button">Play both</button>
       <button id="sync-pause" type="button">Pause both</button>
       <a class="btn" id="dl-original" href="#">Download original</a>
       <a class="btn" id="dl-compressed" href="#">Download compressed</a>
+      <select id="video-select" class="hidden" aria-hidden="true"><option value="">Loading videos…</option></select>
     </section>
+    <div class="analyze-video-status" id="analyze-video-status"></div>
 
-    <div class="stats" id="video-stats"></div>
+    <section class="full-encode-result hidden" id="full-encode-result">
+      <h2>Full video compress result</h2>
+      <div class="full-encode-grid" id="full-encode-grid"></div>
+    </section>
 
     <section class="players">
       <div class="player-card">
@@ -674,7 +1000,54 @@
       </div>
     </section>
 
+    <section class="segments-panel" id="segments-panel">
+      <div class="segments-panel-head">
+        <div>
+          <h2>Segments</h2>
+          <div class="sub" id="segments-status">Select a video and click Analyze to split by scene and show segments</div>
+        </div>
+        <div class="seg-action-row">
+          <button id="seg-ml-candidate-btn" type="button" disabled title="ML candidate not ready yet">ML candidate</button>
+          <button id="seg-feature-btn" type="button">Feature based</button>
+          <button id="seg-compress-btn" type="button">Compress</button>
+        </div>
+      </div>
+      <div class="seg-action-status" id="seg-action-status"></div>
+      <div class="video-features-bar" id="video-features-bar"></div>
+      <div class="segments-blocks" id="segments-blocks"></div>
+    </section>
+
+    <section class="feature-analysis-panel" id="feature-analysis-panel">
+      <h2>Feature analysis</h2>
+      <div class="sub" id="feature-analysis-status">
+        Per-segment ML features with CRF / aq-strength when grid-search results exist
+      </div>
+      <div class="feature-analysis-wrap">
+        <table id="feature-analysis-table" class="hidden">
+          <thead>
+            <tr>
+              <th>Seg</th>
+              <th>Time</th>
+              <th>CRF</th>
+              <th>aq-strength</th>
+              <th>SI</th>
+              <th>TI</th>
+              <th>noise</th>
+              <th>flatness</th>
+              <th>duration</th>
+              <th>luma</th>
+              <th>sat</th>
+            </tr>
+          </thead>
+          <tbody id="feature-analysis-body"></tbody>
+        </table>
+      </div>
+      <div id="feature-analysis-chart" class="hidden"></div>
+      <div id="feature-analysis-empty">Select a video with segments to analyze features</div>
+    </section>
+
     <footer>Auto-refresh system stats every 3s · Source videos from workspace/raw videos</footer>
+  </div>
   </div>
 
   <script>
@@ -682,140 +1055,885 @@
     const originalVideo = document.getElementById("original-video");
     const compressedVideo = document.getElementById("compressed-video");
     const compressedWrap = document.getElementById("compressed-wrap");
-    const videoStats = document.getElementById("video-stats");
     const dlOriginal = document.getElementById("dl-original");
     const dlCompressed = document.getElementById("dl-compressed");
 
     let catalog = [];
     let fetchPollTimer = null;
-    let compressPollTimer = null;
+    let segmentAnalyzePollTimer = null;
     const LOG_DISPLAY_LIMIT = 60;
+
+    function shortVideoName(name) {
+      const stem = String(name || "").replace(/\.mp4$/i, "");
+      if (stem.length <= 18) return stem;
+      return `${stem.slice(0, 8)}…${stem.slice(-6)}`;
+    }
+
+    function setCurrentVideoLabel(name) {
+      const el = document.getElementById("current-video-label");
+      el.textContent = name || "No video selected";
+      el.title = name || "";
+      document.getElementById("analyze-video-btn").disabled = !name;
+    }
+
+    function setAnalyzeVideoStatus(msg, cls = "") {
+      const el = document.getElementById("analyze-video-status");
+      el.textContent = msg || "";
+      el.className = `analyze-video-status ${cls}`.trim();
+    }
+
+    function fmtFeat(v, digits = 3) {
+      if (v == null || Number.isNaN(Number(v))) return "—";
+      return Number(v).toFixed(digits);
+    }
+
+    function fmtBitrate(bps) {
+      if (bps == null || Number.isNaN(Number(bps))) return null;
+      const v = Number(bps);
+      if (v >= 1e6) return `${(v / 1e6).toFixed(2)} Mbps`;
+      if (v >= 1e3) return `${(v / 1e3).toFixed(1)} kbps`;
+      return `${Math.round(v)} bps`;
+    }
+
+    function featureRows(feats) {
+      // ML training features from segmented videos/*/features.json
+      const keys = [
+        ["si", 2, "SI"],
+        ["ti", 2, "TI"],
+        ["noise", 4],
+        ["flatness", 3],
+        ["duration_sec", 2, "duration"],
+        ["luma_mean", 3, "luma"],
+        ["sat_mean", 3, "sat"],
+      ];
+      return keys.map(([key, digits, label]) => {
+        const name = label || key;
+        return `<span>${name} <strong>${fmtFeat(feats[key], digits)}</strong></span>`;
+      }).join("");
+    }
+
+    function renderVideoFeatures(payload) {
+      const bar = document.getElementById("video-features-bar");
+      bar.innerHTML = "";
+      if (!payload) return;
+      const m = payload.meta || {};
+      const pills = [];
+      const name = payload.video || (payload.stem ? `${payload.stem}.mp4` : "");
+      if (name) {
+        pills.push(`<span class="seg-pill"><strong>${name}</strong></span>`);
+      }
+      if (m.width && m.height) {
+        pills.push(`<span class="seg-pill">${m.width}×${m.height}</span>`);
+      }
+      const bpsLabel = fmtBitrate(payload.bitrate_bps);
+      if (bpsLabel) {
+        pills.push(`<span class="seg-pill">${bpsLabel}</span>`);
+      }
+      if (m.duration != null) {
+        pills.push(
+          `<span class="seg-pill">${Number(m.duration).toFixed(1)}s</span>`
+        );
+      }
+      const nSeg = payload.n_segments
+        ?? payload.summary?.segment_count
+        ?? (payload.segments || []).length;
+      if (nSeg != null && nSeg !== "") {
+        pills.push(`<span class="seg-pill">${nSeg} segments</span>`);
+      }
+      bar.innerHTML = pills.join("");
+    }
+
+    const DEFAULT_SEG_PARAMS =
+      "aq-mode=2:rd=6:ref=6:rdoq-level=2:me=hex:subme=2:merange=57:max-merge=3:bframes=6:rc-lookahead=40:keyint=60:min-keyint=1:scenecut=40";
+
+    function parseX265Params(str) {
+      const out = {};
+      for (const part of String(str || "").split(":")) {
+        const i = part.indexOf("=");
+        if (i <= 0) continue;
+        out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+      }
+      return out;
+    }
+
+    function formatX265Params(obj) {
+      return Object.entries(obj)
+        .filter(([, v]) => v != null && String(v).trim() !== "")
+        .map(([k, v]) => `${k}=${v}`)
+        .join(":");
+    }
+
+    function setParamsAqStrength(paramsStr, aq) {
+      const obj = parseX265Params(paramsStr || DEFAULT_SEG_PARAMS);
+      if (aq != null && String(aq).trim() !== "") obj["aq-strength"] = String(aq).trim();
+      return formatX265Params(obj);
+    }
+
+    function segmentParamDefaults(seg) {
+      const best = seg.encode_best || {};
+      let params = best.params || DEFAULT_SEG_PARAMS;
+      const aq = seg.aq_strength != null
+        ? seg.aq_strength
+        : (best.aq_strength != null ? best.aq_strength : parseX265Params(params)["aq-strength"]);
+      if (aq != null && String(aq).trim() !== "") {
+        params = setParamsAqStrength(params, aq);
+      }
+      return {
+        crf: seg.crf != null ? seg.crf : (best.crf != null ? best.crf : ""),
+        aq_strength: aq != null ? aq : "",
+        params,
+      };
+    }
+
+    function bestGridPills(seg) {
+      const best = seg.encode_best || {};
+      const hasBest = seg.crf != null || best.crf != null;
+      if (!hasBest) {
+        return `<div class="seg-result-empty">No sweep results yet</div>`;
+      }
+      const pills = [];
+      if (seg.encode_source) {
+        pills.push(
+          `<span class="seg-pill">source <strong>${seg.encode_source}</strong></span>`
+        );
+      }
+      const crf = seg.crf != null ? seg.crf : best.crf;
+      const aq = seg.aq_strength != null ? seg.aq_strength : best.aq_strength;
+      const ratio = seg.compression_ratio != null
+        ? seg.compression_ratio
+        : best.compression_ratio;
+      const vmaf = seg.vmaf != null
+        ? seg.vmaf
+        : (seg.vmaf_neg != null ? seg.vmaf_neg : best.vmaf_neg);
+      const final = seg.final_score != null ? seg.final_score : best.s_f;
+      if (crf != null) pills.push(`<span class="seg-pill">CRF <strong>${crf}</strong></span>`);
+      if (aq != null) {
+        pills.push(
+          `<span class="seg-pill">aq <strong>${Number(aq).toFixed(2)}</strong></span>`
+        );
+      }
+      if (ratio != null) {
+        pills.push(
+          `<span class="seg-pill">ratio <strong>${Number(ratio).toFixed(2)}x</strong></span>`
+        );
+      }
+      if (vmaf != null) {
+        pills.push(
+          `<span class="seg-pill">VMAF <strong>${Number(vmaf).toFixed(2)}</strong></span>`
+        );
+      }
+      if (final != null) {
+        pills.push(
+          `<span class="seg-pill">final <strong>${Number(final).toFixed(4)}</strong></span>`
+        );
+      }
+      return `<div class="seg-pills">${pills.join("")}</div>`;
+    }
+
+    function autosizeParamsTextarea(el) {
+      if (!el) return;
+      el.style.height = "auto";
+      el.style.height = `${el.scrollHeight}px`;
+    }
+
+    function makeSegmentBlock(seg) {
+      const block = document.createElement("div");
+      block.className = "segment-block";
+      block.dataset.segIndex = String(seg.index);
+      const defaults = segmentParamDefaults(seg);
+      const feats = seg.features || {};
+      const t0 = seg.start_sec != null ? Number(seg.start_sec).toFixed(2) : "—";
+      const t1 = seg.end_sec != null ? Number(seg.end_sec).toFixed(2) : "—";
+      const media = seg.url
+        ? `<video controls preload="metadata" src="${seg.url}"></video>`
+        : `<div class="seg-empty">Clip not ready</div>`;
+
+      block.innerHTML = `
+        <div class="seg-preview">
+          ${media}
+          <div class="seg-title">seg[${seg.index}] · ${t0}s–${t1}s</div>
+        </div>
+        <div class="seg-body">
+          <div class="seg-section">
+            <div class="seg-section-label">Best (sweep)</div>
+            ${bestGridPills(seg)}
+          </div>
+          <div class="seg-section">
+            <div class="seg-section-label">Features</div>
+            <div class="seg-features">${featureRows(feats)}</div>
+          </div>
+          <div class="seg-section">
+            <div class="seg-section-label">Encode params</div>
+            <div class="seg-param-grid">
+              <label>CRF
+                <input type="number" step="1" min="0" max="51" data-field="crf"
+                  value="${defaults.crf !== "" ? defaults.crf : ""}" />
+              </label>
+              <label>aq-strength
+                <input type="number" step="0.1" min="0" max="3" data-field="aq_strength"
+                  value="${defaults.aq_strength !== "" ? defaults.aq_strength : ""}" />
+              </label>
+              <label class="wide">x265-params
+                <textarea data-field="params" rows="1">${defaults.params || ""}</textarea>
+              </label>
+            </div>
+          </div>
+          <div class="seg-section">
+            <div class="seg-section-label">Compress result</div>
+            <div class="seg-param-results" data-seg-results>
+              <div class="seg-result-empty">Compress to see encode result</div>
+            </div>
+          </div>
+        </div>`;
+
+      const paramsEl = block.querySelector('[data-field="params"]');
+      const syncAqIntoParams = () => {
+        const aq = block.querySelector('[data-field="aq_strength"]')?.value?.trim();
+        if (paramsEl) {
+          paramsEl.value = setParamsAqStrength(paramsEl.value || DEFAULT_SEG_PARAMS, aq);
+          autosizeParamsTextarea(paramsEl);
+        }
+      };
+      const syncAqFromParams = () => {
+        const parsed = parseX265Params(paramsEl?.value || "");
+        const aqEl = block.querySelector('[data-field="aq_strength"]');
+        if (aqEl && parsed["aq-strength"] != null) aqEl.value = parsed["aq-strength"];
+        autosizeParamsTextarea(paramsEl);
+      };
+      block.querySelector('[data-field="aq_strength"]')
+        ?.addEventListener("input", syncAqIntoParams);
+      paramsEl?.addEventListener("input", () => autosizeParamsTextarea(paramsEl));
+      paramsEl?.addEventListener("change", syncAqFromParams);
+      requestAnimationFrame(() => autosizeParamsTextarea(paramsEl));
+      return block;
+    }
+
+    function renderFeatureAnalysis(payload) {
+      const table = document.getElementById("feature-analysis-table");
+      const body = document.getElementById("feature-analysis-body");
+      const empty = document.getElementById("feature-analysis-empty");
+      const status = document.getElementById("feature-analysis-status");
+      const chartEl = document.getElementById("feature-analysis-chart");
+      body.innerHTML = "";
+      const segs = payload?.segments || [];
+      if (!segs.length) {
+        table.classList.add("hidden");
+        chartEl.classList.add("hidden");
+        if (window.Plotly) Plotly.purge(chartEl);
+        empty.classList.remove("hidden");
+        empty.textContent = payload?.message
+          || "Select a video with segments to analyze features";
+        status.textContent =
+          "Per-segment ML features with CRF / aq-strength when grid-search results exist";
+        return;
+      }
+      empty.classList.add("hidden");
+      table.classList.remove("hidden");
+      chartEl.classList.remove("hidden");
+
+      const featKeys = [
+        ["si", 2],
+        ["ti", 2],
+        ["noise", 4],
+        ["flatness", 3],
+        ["duration_sec", 2],
+        ["luma_mean", 3],
+        ["sat_mean", 3],
+      ];
+      const extremes = {};
+      for (const [key] of featKeys) {
+        const vals = segs
+          .map((s) => Number((s.features || {})[key]))
+          .filter((v) => !Number.isNaN(v));
+        if (!vals.length) continue;
+        extremes[key] = { min: Math.min(...vals), max: Math.max(...vals) };
+      }
+
+      const withBest = segs.filter((s) => s.crf != null || s.aq_strength != null).length;
+      status.textContent = `${segs.length} segment(s)`
+        + (withBest ? ` · ${withBest} with CRF/aq from grid search` : " · no CRF/aq yet")
+        + " · green=max · orange=min per feature";
+
+      const cellClass = (key, raw) => {
+        const v = Number(raw);
+        const ex = extremes[key];
+        if (!ex || Number.isNaN(v) || ex.min === ex.max) return "num";
+        if (v === ex.max) return "num hi";
+        if (v === ex.min) return "num lo";
+        return "num";
+      };
+
+      for (const seg of segs) {
+        const feats = seg.features || {};
+        const t0 = seg.start_sec != null ? Number(seg.start_sec).toFixed(2) : "—";
+        const t1 = seg.end_sec != null ? Number(seg.end_sec).toFixed(2) : "—";
+        const crf = seg.crf != null ? seg.crf : "—";
+        const aq = seg.aq_strength != null
+          ? Number(seg.aq_strength).toFixed(2)
+          : "—";
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${seg.index}</td>
+          <td class="num">${t0}s–${t1}s</td>
+          <td class="num">${crf}</td>
+          <td class="num">${aq}</td>
+          <td class="${cellClass("si", feats.si)}">${fmtFeat(feats.si, 2)}</td>
+          <td class="${cellClass("ti", feats.ti)}">${fmtFeat(feats.ti, 2)}</td>
+          <td class="${cellClass("noise", feats.noise)}">${fmtFeat(feats.noise, 4)}</td>
+          <td class="${cellClass("flatness", feats.flatness)}">${fmtFeat(feats.flatness, 3)}</td>
+          <td class="${cellClass("duration_sec", feats.duration_sec)}">${fmtFeat(feats.duration_sec, 2)}</td>
+          <td class="${cellClass("luma_mean", feats.luma_mean)}">${fmtFeat(feats.luma_mean, 3)}</td>
+          <td class="${cellClass("sat_mean", feats.sat_mean)}">${fmtFeat(feats.sat_mean, 3)}</td>`;
+        body.appendChild(tr);
+      }
+
+      if (window.Plotly) {
+        const labels = segs.map((s) => `seg[${s.index}]`);
+        const series = [
+          ["SI", "si"],
+          ["TI", "ti"],
+          ["noise", "noise"],
+          ["flatness", "flatness"],
+          ["duration", "duration_sec"],
+          ["luma", "luma_mean"],
+          ["sat", "sat_mean"],
+        ];
+        // Normalize each feature to 0–1 within this video so scales are comparable.
+        const traces = series.map(([name, key]) => {
+          const raw = segs.map((s) => {
+            const v = Number((s.features || {})[key]);
+            return Number.isNaN(v) ? null : v;
+          });
+          const nums = raw.filter((v) => v != null);
+          const lo = nums.length ? Math.min(...nums) : 0;
+          const hi = nums.length ? Math.max(...nums) : 1;
+          const span = hi - lo || 1;
+          const y = raw.map((v) => (v == null ? null : (v - lo) / span));
+          return {
+            type: "bar",
+            name,
+            x: labels,
+            y,
+            text: raw.map((v) => (v == null ? "" : String(Number(v.toPrecision(4))))),
+            hovertemplate: `%{fullData.name} seg %{x}<br>raw=%{text}<br>norm=%{y:.2f}<extra></extra>`,
+          };
+        });
+        const crfVals = segs.map((s) => (s.crf != null ? Number(s.crf) : null));
+        const aqVals = segs.map((s) => (
+          s.aq_strength != null ? Number(s.aq_strength) : null
+        ));
+        if (crfVals.some((v) => v != null)) {
+          const nums = crfVals.filter((v) => v != null);
+          const lo = Math.min(...nums);
+          const hi = Math.max(...nums);
+          const span = hi - lo || 1;
+          traces.push({
+            type: "scatter",
+            mode: "lines+markers",
+            name: "CRF (norm)",
+            x: labels,
+            y: crfVals.map((v) => (v == null ? null : (v - lo) / span)),
+            text: crfVals.map((v) => (v == null ? "" : String(v))),
+            line: { color: "#4da3ff", width: 2 },
+            marker: { size: 8 },
+            hovertemplate: "CRF %{text} (norm %{y:.2f})<extra></extra>",
+          });
+        }
+        if (aqVals.some((v) => v != null)) {
+          const nums = aqVals.filter((v) => v != null);
+          const lo = Math.min(...nums);
+          const hi = Math.max(...nums);
+          const span = hi - lo || 1;
+          traces.push({
+            type: "scatter",
+            mode: "lines+markers",
+            name: "aq (norm)",
+            x: labels,
+            y: aqVals.map((v) => (v == null ? null : (v - lo) / span)),
+            text: aqVals.map((v) => (v == null ? "" : Number(v).toFixed(2))),
+            line: { color: "#4ecf8a", width: 2, dash: "dot" },
+            marker: { size: 8 },
+            hovertemplate: "aq %{text} (norm %{y:.2f})<extra></extra>",
+          });
+        }
+        Plotly.newPlot(
+          chartEl,
+          traces,
+          {
+            title: {
+              text: "Segment comparison — features & CRF/aq normalized 0–1 within this video",
+              font: { size: 13 },
+            },
+            barmode: "group",
+            paper_bgcolor: "rgba(0,0,0,0)",
+            plot_bgcolor: "rgba(0,0,0,0)",
+            font: { color: "#c8d0dc" },
+            margin: { t: 48, r: 24, b: 64, l: 48 },
+            legend: { orientation: "h", y: -0.25 },
+            xaxis: { title: "segment", gridcolor: "rgba(255,255,255,0.06)" },
+            yaxis: {
+              title: "normalized (0–1)",
+              range: [0, 1.05],
+              gridcolor: "rgba(255,255,255,0.06)",
+            },
+          },
+          { responsive: true, displayModeBar: false }
+        );
+      }
+    }
+
+    function renderSegments(payload) {
+      const list = document.getElementById("segments-blocks");
+      const status = document.getElementById("segments-status");
+      list.innerHTML = "";
+      renderVideoFeatures(payload);
+      renderFeatureAnalysis(payload);
+      if (!payload || !(payload.segments || []).length) {
+        status.textContent = payload?.message
+          || "No segments yet — click Analyze to split this video";
+        return;
+      }
+      const segs = payload.segments || [];
+      status.textContent = payload.split
+        ? `${segs.length} segment block(s)`
+        : "Features available — clips not split yet";
+      for (const seg of segs) list.appendChild(makeSegmentBlock(seg));
+    }
+
+    function setSegActionStatus(msg, cls = "") {
+      const el = document.getElementById("seg-action-status");
+      el.textContent = msg || "";
+      el.className = `seg-action-status ${cls}`.trim();
+    }
+
+    function applyFeatureCandidates(candidates) {
+      const byIdx = new Map((candidates || []).map((c) => [Number(c.index), c]));
+      document.querySelectorAll(".segment-block").forEach((card) => {
+        const idx = Number(card.dataset.segIndex);
+        const c = byIdx.get(idx);
+        if (!c) return;
+        const crfEl = card.querySelector('[data-field="crf"]');
+        const aqEl = card.querySelector('[data-field="aq_strength"]');
+        const paramsEl = card.querySelector('[data-field="params"]');
+        if (crfEl && c.crf != null) crfEl.value = c.crf;
+        if (aqEl && c.aq_strength != null) aqEl.value = c.aq_strength;
+        if (paramsEl && c.params) paramsEl.value = c.params;
+        paramsEl?.dispatchEvent(new Event("change"));
+        autosizeParamsTextarea(paramsEl);
+      });
+    }
+
+    async function runFeatureBasedCandidates() {
+      const name = videoSelect.value;
+      if (!name) {
+        setSegActionStatus("Select a video first", "error");
+        return;
+      }
+      const btn = document.getElementById("seg-feature-btn");
+      btn.disabled = true;
+      setSegActionStatus("Proposing feature-based params…", "running");
+      try {
+        const res = await fetch("/api/segments/feature-candidates", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ video: name, vmaf_threshold: 85 }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "failed");
+        applyFeatureCandidates(data.candidates || []);
+        setSegActionStatus(
+          `Feature-based params filled for ${data.n_segments} segment(s)`,
+          "done"
+        );
+      } catch (err) {
+        setSegActionStatus(`Feature based failed: ${err}`, "error");
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function collectSegmentEncodeSpecs() {
+      const specs = [];
+      document.querySelectorAll(".segment-block").forEach((card) => {
+        const idx = Number(card.dataset.segIndex);
+        const crf = card.querySelector('[data-field="crf"]')?.value?.trim();
+        const aq = card.querySelector('[data-field="aq_strength"]')?.value?.trim();
+        const params = card.querySelector('[data-field="params"]')?.value?.trim();
+        specs.push({
+          index: idx,
+          crf: crf === "" ? null : Number(crf),
+          aq_strength: aq === "" ? null : Number(aq),
+          params: params || "",
+        });
+      });
+      return specs;
+    }
+
+    let segEncodePollTimer = null;
+
+    function encodeResultPills(row) {
+      const pills = [];
+      if (row.crf != null) {
+        pills.push(`<span class="seg-pill">CRF <strong>${row.crf}</strong></span>`);
+      }
+      if (row.aq_strength != null) {
+        pills.push(
+          `<span class="seg-pill">aq <strong>${Number(row.aq_strength).toFixed(2)}</strong></span>`
+        );
+      }
+      if (row.size_human) {
+        pills.push(`<span class="seg-pill">${row.size_human}</span>`);
+      }
+      if (row.compression_ratio != null) {
+        pills.push(
+          `<span class="seg-pill">ratio <strong>${Number(row.compression_ratio).toFixed(2)}x</strong></span>`
+        );
+      }
+      if (row.encode_sec != null) {
+        pills.push(
+          `<span class="seg-pill">${Number(row.encode_sec).toFixed(1)}s</span>`
+        );
+      }
+      return pills.join("");
+    }
+
+    function applySegmentEncodeResults(result) {
+      const byIdx = new Map(
+        (result?.segments || []).map((s) => [Number(s.index), s])
+      );
+      document.querySelectorAll(".segment-block").forEach((card) => {
+        const idx = Number(card.dataset.segIndex);
+        const row = byIdx.get(idx);
+        const box = card.querySelector("[data-seg-results]");
+        if (!box) return;
+        if (!row) {
+          box.innerHTML = `<div class="seg-result-empty">No encode result</div>`;
+          return;
+        }
+        const media = row.url
+          ? `<video controls preload="metadata" src="${row.url}"></video>`
+          : "";
+        box.innerHTML = `
+          ${media}
+          <div class="seg-result-pills">${encodeResultPills(row)}</div>`;
+      });
+    }
+
+    function clearFullEncodeResult() {
+      const panel = document.getElementById("full-encode-result");
+      const grid = document.getElementById("full-encode-grid");
+      panel.classList.add("hidden");
+      grid.innerHTML = "";
+    }
+
+    function renderFullEncodeResult(result) {
+      const panel = document.getElementById("full-encode-result");
+      const grid = document.getElementById("full-encode-grid");
+      if (!result) {
+        clearFullEncodeResult();
+        return;
+      }
+      const cards = [];
+      const concat = result.full_concat;
+      const single = result.full_single;
+      if (concat?.url) {
+        cards.push(`
+          <div class="full-encode-card">
+            <h3>Full (segment concat) <span class="sub">${concat.size_human || ""}</span></h3>
+            <video controls preload="metadata" src="${concat.url}"></video>
+            <div class="seg-result-pills">${encodeResultPills(concat)}</div>
+          </div>`);
+      }
+      if (single?.url) {
+        cards.push(`
+          <div class="full-encode-card">
+            <h3>Full (single pass) <span class="sub">${single.size_human || ""}</span></h3>
+            <video controls preload="metadata" src="${single.url}"></video>
+            <div class="seg-result-pills">${encodeResultPills(single)}</div>
+          </div>`);
+      }
+      if (!cards.length) {
+        clearFullEncodeResult();
+        return;
+      }
+      grid.innerHTML = cards.join("");
+      panel.classList.remove("hidden");
+
+      // Prefer concat (per-segment params) in the main Compressed player.
+      const preferred = concat?.url || single?.url;
+      if (preferred) {
+        compressedWrap.innerHTML = '<video id="compressed-video" controls preload="metadata"></video>';
+        const cv = document.getElementById("compressed-video");
+        cv.src = preferred;
+        bindSync(cv);
+        document.getElementById("compressed-size").textContent =
+          (concat || single).size_human || "";
+        dlCompressed.href = preferred;
+        dlCompressed.style.pointerEvents = "auto";
+        dlCompressed.style.opacity = "1";
+      }
+    }
+
+    function showEncodeResult(result) {
+      applySegmentEncodeResults(result);
+      renderFullEncodeResult(result);
+    }
+
+    async function pollSegmentEncode() {
+      try {
+        const res = await fetch("/api/segment-encode-status");
+        const data = await res.json();
+        const cls = data.running
+          ? "running"
+          : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setSegActionStatus(data.message || (data.running ? "Compressing…" : ""), cls);
+        if (data.running) {
+          segEncodePollTimer = setTimeout(pollSegmentEncode, 1000);
+          return;
+        }
+        segEncodePollTimer = null;
+        document.getElementById("seg-compress-btn").disabled = false;
+        document.getElementById("seg-feature-btn").disabled = false;
+        if (data.phase === "done" && data.result) {
+          showEncodeResult(data.result);
+          const full = data.result.full_concat || {};
+          const single = data.result.full_single || {};
+          setSegActionStatus(
+            `${data.message}`
+              + (full.url ? ` · concat ${full.size_human || ""}` : "")
+              + (single.url ? ` · single ${single.size_human || ""}` : ""),
+            "done"
+          );
+        } else if (data.phase === "error" && data.result) {
+          applySegmentEncodeResults(data.result);
+        }
+      } catch (err) {
+        segEncodePollTimer = null;
+        setSegActionStatus(`Compress status failed: ${err}`, "error");
+        document.getElementById("seg-compress-btn").disabled = false;
+        document.getElementById("seg-feature-btn").disabled = false;
+      }
+    }
+
+    async function startSegmentCompress() {
+      const name = videoSelect.value;
+      if (!name) {
+        setSegActionStatus("Select a video first", "error");
+        return;
+      }
+      const segments = collectSegmentEncodeSpecs();
+      if (!segments.length) {
+        setSegActionStatus("No segment params to compress", "error");
+        return;
+      }
+      const missing = segments.filter((s) => s.crf == null || !s.params);
+      if (missing.length) {
+        setSegActionStatus(
+          `Fill CRF + params for seg[${missing.map((s) => s.index).join(",")}] `
+            + "(try Feature based first)",
+          "error"
+        );
+        return;
+      }
+      const btn = document.getElementById("seg-compress-btn");
+      btn.disabled = true;
+      document.getElementById("seg-feature-btn").disabled = true;
+      setSegActionStatus("Starting compress…", "running");
+      try {
+        const res = await fetch("/api/segments/compress", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ video: name, segments, preset: "fast" }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "failed");
+        pollSegmentEncode();
+      } catch (err) {
+        setSegActionStatus(`Compress failed: ${err}`, "error");
+        btn.disabled = false;
+        document.getElementById("seg-feature-btn").disabled = false;
+      }
+    }
+
+    async function loadExistingSegments(name) {
+      if (!name) {
+        renderSegments(null);
+        return;
+      }
+      try {
+        const stem = name.replace(/\.mp4$/i, "");
+        const res = await fetch(`/api/segments/${encodeURIComponent(stem)}`);
+        const data = await res.json();
+        if (!res.ok) {
+          renderSegments({ segments: [], message: data.error || "No segments" });
+          return;
+        }
+        if (data.split || (data.segments || []).length) {
+          renderSegments(data);
+          if (data.split) {
+            setAnalyzeVideoStatus(
+              `${data.n_segments} segment(s) already available`,
+              "done"
+            );
+          }
+          try {
+            const er = await fetch(
+              `/api/segments/${encodeURIComponent(stem)}/encode-result`
+            );
+            const erData = await er.json();
+            if (er.ok && erData.found && erData.result) {
+              showEncodeResult(erData.result);
+            }
+          } catch (_) {
+            /* ignore missing encode result */
+          }
+        } else {
+          renderSegments({
+            segments: [],
+            message: "Not analyzed yet — click Analyze to split by scene",
+          });
+          setAnalyzeVideoStatus("");
+        }
+      } catch (err) {
+        renderSegments({ segments: [], message: `Failed to load segments: ${err}` });
+      }
+    }
+
+    async function pollSegmentAnalyze() {
+      try {
+        const res = await fetch("/api/segment-analyze-status");
+        const data = await res.json();
+        const cls = data.running
+          ? "running"
+          : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setAnalyzeVideoStatus(data.message || (data.running ? "Working…" : ""), cls);
+        if (data.result) renderSegments(data.result);
+        if (data.running) {
+          segmentAnalyzePollTimer = setTimeout(pollSegmentAnalyze, 800);
+          return;
+        }
+        segmentAnalyzePollTimer = null;
+        document.getElementById("analyze-video-btn").disabled = !videoSelect.value;
+      } catch (err) {
+        segmentAnalyzePollTimer = null;
+        setAnalyzeVideoStatus(`Analyze failed: ${err}`, "error");
+        document.getElementById("analyze-video-btn").disabled = !videoSelect.value;
+      }
+    }
+
+    async function startVideoAnalyze() {
+      const name = videoSelect.value;
+      if (!name) {
+        setAnalyzeVideoStatus("Select a video first", "error");
+        return;
+      }
+      const btn = document.getElementById("analyze-video-btn");
+      btn.disabled = true;
+      setAnalyzeVideoStatus("Starting analyze…", "running");
+      try {
+        const res = await fetch("/api/segments/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ video: name }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setAnalyzeVideoStatus(data.error || "Analyze failed", "error");
+          btn.disabled = false;
+          return;
+        }
+        if (data.status?.result) renderSegments(data.status.result);
+        pollSegmentAnalyze();
+      } catch (err) {
+        setAnalyzeVideoStatus(`Analyze failed: ${err}`, "error");
+        btn.disabled = false;
+      }
+    }
+
+    function renderVideoSidebar(activeName) {
+      const list = document.getElementById("video-sidebar-list");
+      const countEl = document.getElementById("sidebar-video-count");
+      const query = (document.getElementById("sidebar-video-search").value || "").trim().toLowerCase();
+      const items = filteredCatalog().filter((item) => {
+        if (!query) return true;
+        return String(item.name || "").toLowerCase().includes(query);
+      });
+      const selected = activeName || videoSelect.value || "";
+      countEl.textContent = `${items.length} / ${catalog.length} shown`;
+      list.innerHTML = "";
+      if (!items.length) {
+        list.innerHTML = '<div class="empty" style="padding:24px 8px;">No videos</div>';
+        return;
+      }
+      for (const item of items) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "video-thumb" + (item.name === selected ? " active" : "");
+        btn.dataset.name = item.name;
+        btn.title = item.name;
+        const enc = encodeURIComponent(item.name);
+        const thumbUrl = item.thumb_url || `/media/thumb/${enc}`;
+        btn.innerHTML = `
+          <img class="thumb-img" alt="" loading="lazy" decoding="async" />
+          <div class="thumb-name">${shortVideoName(item.name)}</div>
+          <div class="thumb-meta">
+            <span>${item.original_size_human || "—"}</span>
+            <span class="thumb-tag ${item.has_compressed ? "ok" : "muted"}">
+              ${item.has_compressed ? "compressed" : "original"}
+            </span>
+          </div>`;
+        const img = btn.querySelector("img.thumb-img");
+        img.addEventListener("error", () => {
+          const ph = document.createElement("div");
+          ph.className = "thumb-placeholder";
+          ph.textContent = "no preview";
+          img.replaceWith(ph);
+        }, { once: true });
+        // Defer thumbnail fetch until the row is near the viewport.
+        img.dataset.src = thumbUrl;
+        if (thumbObserver) {
+          thumbObserver.observe(img);
+        } else {
+          img.src = thumbUrl;
+        }
+        btn.addEventListener("click", () => {
+          if (videoSelect.value !== item.name) {
+            videoSelect.value = item.name;
+          }
+          selectVideo(item.name);
+          highlightSidebarVideo(item.name);
+        });
+        list.appendChild(btn);
+      }
+    }
+
+    const thumbObserver = ("IntersectionObserver" in window)
+      ? new IntersectionObserver((entries) => {
+          for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+            const img = entry.target;
+            const src = img.dataset.src;
+            if (src && !img.getAttribute("src")) img.src = src;
+            thumbObserver.unobserve(img);
+          }
+        }, { root: document.getElementById("video-sidebar-list"), rootMargin: "120px 0px", threshold: 0.01 })
+      : null;
+
+    function highlightSidebarVideo(name) {
+      let target = null;
+      document.querySelectorAll(".video-thumb").forEach((el) => {
+        const on = el.dataset.name === name;
+        el.classList.toggle("active", on);
+        if (on) target = el;
+      });
+      if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
 
     function tailLines(text, limit = LOG_DISPLAY_LIMIT) {
       const lines = String(text || "").split("\n");
       if (lines.length <= limit) return { text: String(text || ""), total: lines.length, truncated: false };
       const tail = lines.slice(-limit);
       return { text: tail.join("\n"), total: lines.length, truncated: true };
-    }
-
-    const LIBX265_PRESETS = [
-      "ultrafast", "superfast", "veryfast", "faster", "fast",
-      "medium", "slow", "slower", "veryslow", "placebo",
-    ];
-    const NVENC_PRESETS = ["p1", "p2", "p3", "p4", "p5", "p6", "p7"];
-
-    function populatePresetOptions(encoder) {
-      const preset = document.getElementById("preset");
-      const current = preset.value;
-      const options = encoder === "hevc_nvenc" ? NVENC_PRESETS : LIBX265_PRESETS;
-      preset.innerHTML = "";
-      for (const name of options) {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name;
-        preset.appendChild(opt);
-      }
-      if (options.includes(current)) preset.value = current;
-      else preset.value = encoder === "hevc_nvenc" ? "p5" : "medium";
-    }
-
-    function toggleEncoderFields() {
-      const isNvenc = document.getElementById("encoder").value === "hevc_nvenc";
-      document.querySelectorAll(".libx265-only").forEach(el => el.classList.toggle("hidden", isNvenc));
-      document.querySelectorAll(".nvenc-only").forEach(el => el.classList.toggle("hidden", !isNvenc));
-      populatePresetOptions(document.getElementById("encoder").value);
-    }
-
-    async function loadEncodeDefaults() {
-      try {
-        const res = await fetch("/api/encode-defaults");
-        const data = await res.json();
-        const d = data.defaults || {};
-        if (d.encoder) document.getElementById("encoder").value = d.encoder;
-        toggleEncoderFields();
-        if (d.preset) document.getElementById("preset").value = d.preset;
-        if (d.libx265_profile) document.getElementById("libx265-profile").value = d.libx265_profile;
-        if (d.libx265_params) document.getElementById("libx265-params").value = d.libx265_params;
-        if (d.target_bitrate) document.getElementById("target-bitrate").value = d.target_bitrate;
-        if (d.target_compression_rate != null) {
-          document.getElementById("target-compression-rate").value = d.target_compression_rate;
-        }
-        if (d.crf_min != null) document.getElementById("crf-min").value = d.crf_min;
-        if (d.crf_max != null) document.getElementById("crf-max").value = d.crf_max;
-        if (d.crf_candidates != null) document.getElementById("crf-candidates").value = d.crf_candidates;
-        if (d.crf_spread != null) document.getElementById("crf-spread").value = d.crf_spread;
-        if (d.vmaf_n_threads != null) {
-          document.getElementById("vmaf-n-threads").value = d.vmaf_n_threads;
-        }
-        if (d.nvenc_rc) document.getElementById("nvenc-rc").value = d.nvenc_rc;
-        if (d.nvenc_multipass) document.getElementById("nvenc-multipass").value = d.nvenc_multipass;
-        if (d.libx265_feature_baseline != null) {
-          document.getElementById("libx265-feature-baseline").checked = Boolean(d.libx265_feature_baseline);
-        }
-        if (d.run_no_preprocess != null) {
-          document.getElementById("run-no-preprocess").checked = Boolean(d.run_no_preprocess);
-        }
-        if (d.run_full_video != null) {
-          document.getElementById("run-full-video").checked = Boolean(d.run_full_video);
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    function parseOptionalInt(id) {
-      const raw = document.getElementById(id).value.trim();
-      if (raw === "") return undefined;
-      const n = Number(raw);
-      return Number.isFinite(n) ? Math.trunc(n) : undefined;
-    }
-
-    function collectEncodeParams() {
-      const encoder = document.getElementById("encoder").value;
-      const params = {
-        encoder,
-        preset: document.getElementById("preset").value,
-        libx265_feature_baseline: document.getElementById("libx265-feature-baseline").checked,
-      };
-      for (const [key, id] of [
-        ["crf_min", "crf-min"],
-        ["crf_max", "crf-max"],
-        ["crf_candidates", "crf-candidates"],
-        ["crf_spread", "crf-spread"],
-        ["vmaf_n_threads", "vmaf-n-threads"],
-      ]) {
-        const value = parseOptionalInt(id);
-        if (value != null) params[key] = value;
-      }
-      if (params.vmaf_n_threads == null) params.vmaf_n_threads = 10;
-      if (document.getElementById("run-no-preprocess").checked) {
-        params.preprocess = "none";
-        params.preprocess_auto = false;
-        params.preprocess_ab = false;
-        params.preprocess_sweep = false;
-      } else {
-        params.preprocess = null;
-        params.preprocess_auto = true;
-        params.preprocess_ab = true;
-      }
-      params.vbr_mode_tune = !document.getElementById("run-full-video").checked;
-      if (document.getElementById("run-full-video").checked) {
-        params.param_tune = false;
-        params.crf_mode_tune = false;
-        params.scene_crf_search = false;
-        params.vbr_fallback_to_crf = false;
-      }
-      if (encoder === "libx265") {
-        params.libx265_profile = document.getElementById("libx265-profile").value;
-        if (params.crf_min != null) params.libx265_crf_min = params.crf_min;
-        if (params.crf_max != null) params.libx265_crf_max = params.crf_max;
-        const x265 = document.getElementById("libx265-params").value.trim();
-        if (x265) params.libx265_params = x265;
-      } else {
-        params.nvenc_rc = document.getElementById("nvenc-rc").value;
-        params.nvenc_multipass = document.getElementById("nvenc-multipass").value;
-      }
-      return params;
     }
 
     function pctBar(el, value) {
@@ -843,20 +1961,6 @@
         pctBar(document.getElementById("disk-bar"), data.disk.percent);
         document.getElementById("load-metric").textContent = fmtLoad(data.load_avg);
         document.getElementById("cpu-count").textContent = `${data.cpu_count} logical CPUs`;
-
-        const gpuList = document.getElementById("gpu-list");
-        gpuList.innerHTML = "";
-        if (!data.gpus?.length) {
-          document.getElementById("gpu-metric").textContent = "No GPU detected";
-        } else {
-          document.getElementById("gpu-metric").textContent = `${data.gpus.length} GPU(s)`;
-          for (const gpu of data.gpus) {
-            const div = document.createElement("div");
-            div.className = "gpu-item";
-            div.textContent = `#${gpu.index} ${gpu.name} · util ${gpu.utilization_pct ?? "—"}% · VRAM ${gpu.memory_used_mb ?? "—"}/${gpu.memory_total_mb ?? "—"} MB · ${gpu.temperature_c ?? "—"}°C`;
-            gpuList.appendChild(div);
-          }
-        }
       } catch (err) {
         console.error(err);
       }
@@ -885,6 +1989,10 @@
       videoSelect.innerHTML = "";
       if (!items.length) {
         videoSelect.innerHTML = '<option value="">No videos found</option>';
+        setCurrentVideoLabel("");
+        renderSegments(null);
+        setAnalyzeVideoStatus("");
+        renderVideoSidebar("");
         return;
       }
       for (const item of items) {
@@ -903,6 +2011,7 @@
         || items[0];
       videoSelect.value = preferred.name;
       selectVideo(preferred.name);
+      renderVideoSidebar(preferred.name);
     }
 
     function setFetchStatus(data, cls = "") {
@@ -925,8 +2034,8 @@
       term.textContent = tailed.text + errorLines;
       const tailNote = tailed.truncated ? ` · last ${LOG_DISPLAY_LIMIT}/${tailed.total} lines` : "";
       meta.textContent = data.running
-        ? `live${tailNote}`
-        : `${data.wandb_run ? data.wandb_run + " · " : ""}${data.done || 0} downloaded · ${data.skipped || 0} local · ${data.failed || 0} failed${tailNote}`;
+        ? `live${tailNote}${data.download_dir ? ` · → ${data.download_dir}` : ""}`
+        : `${data.wandb_run ? data.wandb_run + " · " : ""}${data.done || 0} downloaded · ${data.skipped || 0} local · ${data.failed || 0} failed${tailNote}${data.download_dir ? ` · ${data.download_dir}` : ""}`;
       if (data.running) {
         term.scrollTop = term.scrollHeight;
       }
@@ -988,52 +2097,21 @@
       }
     }
 
-    function renderStats(item) {
-      videoStats.innerHTML = "";
-      if (!item) return;
-      const req = item.request_params || {};
-      const enc = item.encode_params || {};
-      const codecMode = req.codec_mode;
-      const isBitrateMode = codecMode != null
-        && ["abr", "vbr", "bitrate"].includes(String(codecMode).toLowerCase());
-      const crfValue = enc.crf != null
-        ? enc.crf
-        : (req.crf_min != null && req.crf_max != null ? `${req.crf_min}–${req.crf_max}` : null);
-      const pills = [
-        ["Job", item.job_id || "—"],
-        ["Strategy", item.strategy || enc.strategy || "—"],
-        ["Encoder", req.encoder || enc.encoder || "—"],
-        ["Codec Mode", codecMode || "—"],
-        ...(isBitrateMode ? [["Target Bitrate", req.target_bitrate || "—"]] : []),
-        ["Preset", req.preset || "—"],
-        ["Profile", req.libx265_profile || "—"],
-        ["CRF", item.chosen_crf != null ? item.chosen_crf : (crfValue != null ? crfValue : "—")],
-        ["Final Score", item.final_score != null ? item.final_score.toFixed(4) : "—"],
-        ["VMAF", item.vmaf != null ? item.vmaf.toFixed(2) : "—"],
-        ["Compression Rate", item.compression_rate != null ? item.compression_rate.toFixed(4) : "—"],
-        ["Compression Ratio", item.compression_ratio != null ? `${item.compression_ratio.toFixed(2)}x` : "—"],
-        ["Avg Bitrate", item.avg_bitrate_mbps != null ? `${item.avg_bitrate_mbps.toFixed(3)} Mbps` : "—"],
-        ["Elapsed", item.elapsed_sec != null ? `${item.elapsed_sec.toFixed(1)}s` : "—"],
-      ];
-      if (item.error) {
-        pills.push(["Error", item.error]);
-      }
-      if (req.libx265_params) {
-        pills.push(["x265-params", req.libx265_params]);
-      }
-      for (const [label, value] of pills) {
-        const el = document.createElement("div");
-        el.className = "pill" + (label === "x265-params" || label === "Error" ? " wide" : "")
-          + (label === "Error" ? " err" : "");
-        if (label === "x265-params" || label === "Error") el.title = String(value);
-        el.innerHTML = `${label}: <strong>${value}</strong>`;
-        videoStats.appendChild(el);
-      }
-    }
-
     function selectVideo(name) {
       const item = catalog.find(v => v.name === name);
-      if (!item) return;
+      if (!item) {
+        setCurrentVideoLabel("");
+        renderSegments(null);
+        setAnalyzeVideoStatus("");
+        clearFullEncodeResult();
+        return;
+      }
+
+      if (videoSelect.value !== item.name) {
+        videoSelect.value = item.name;
+      }
+      setCurrentVideoLabel(item.name);
+      clearFullEncodeResult();
 
       const enc = encodeURIComponent(item.name);
       originalVideo.src = `/media/original/${enc}`;
@@ -1056,7 +2134,14 @@
         dlCompressed.style.pointerEvents = "none";
         dlCompressed.style.opacity = "0.5";
       }
-      renderStats(item);
+      highlightSidebarVideo(item.name);
+      loadExistingSegments(item.name);
+      const stem = item.name.replace(/\.mp4$/i, "");
+      loadSegmentGridCatalog(stem).then(() => {
+        if (document.getElementById("grid-video").value) {
+          loadSegmentGridSurface();
+        }
+      }).catch(() => {});
     }
 
     function bindSync(otherVideo) {
@@ -1072,234 +2157,20 @@
     }
 
     async function loadVideos(preferredName) {
-      const res = await fetch("/api/videos");
-      const data = await res.json();
-      catalog = data.videos || [];
-      populateSelect(preferredName);
-      renderVideoChecklist();
-    }
-
-    function renderVideoChecklist() {
-      const list = document.getElementById("video-checklist");
-      const checked = new Set(
-        [...list.querySelectorAll('input[type="checkbox"]:checked')].map(el => el.value)
-      );
-      list.innerHTML = "";
-      for (const item of catalog) {
-        const label = document.createElement("label");
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.value = item.name;
-        input.checked = checked.has(item.name);
-        label.appendChild(input);
-        const when = fmtResultTime(item);
-        const text = when ? `${item.name} · ${when}` : item.name;
-        label.appendChild(document.createTextNode(text));
-        list.appendChild(label);
-      }
-      updateSelectedCount();
-    }
-
-    function selectedVideoNames() {
-      return [...document.querySelectorAll("#video-checklist input:checked")].map(el => el.value);
-    }
-
-    function updateSelectedCount() {
-      const count = selectedVideoNames().length;
-      document.getElementById("selected-count").textContent = `${count} selected`;
-    }
-
-    function selectVideos(count) {
-      const boxes = [...document.querySelectorAll("#video-checklist input[type='checkbox']")];
-      boxes.forEach(box => { box.checked = false; });
-      for (const box of boxes.slice(0, count)) {
-        box.checked = true;
-      }
-      updateSelectedCount();
-    }
-
-    function toggleTargetBitrateField() {
-      const isVbr = document.getElementById("codec-mode").value === "vbr";
-      document.getElementById("target-bitrate-field").classList.toggle("hidden", !isVbr);
-      document.getElementById("target-rate-field").classList.toggle("hidden", !isVbr);
-    }
-
-    function parseCompressionRate(raw) {
-      const text = String(raw ?? "").trim();
-      if (!text) return null;
-      const rate = Number(text);
-      if (!Number.isFinite(rate) || rate <= 0 || rate >= 1) return NaN;
-      return rate;
-    }
-
-    function compressStatusClass(data) {
-      if (data.running) return "running";
-      if (data.phase === "stopped") return "stopped";
-      if (data.phase === "error") return "error";
-      if (data.phase === "done") return "done";
-      return "";
-    }
-
-    function updateCompressButtons(running) {
-      document.getElementById("compress-btn").disabled = running;
-      document.getElementById("compress-stop-btn").classList.toggle("hidden", !running);
-    }
-
-    function setCompressStatus(data, cls = "") {
-      const el = document.getElementById("compress-status");
-      el.textContent = data.message || "Ready";
-      el.className = `compress-status ${cls}`.trim();
-    }
-
-    function renderCompressTerminal(data) {
-      const wrap = document.getElementById("compress-terminal-wrap");
-      const term = document.getElementById("compress-terminal");
-      const meta = document.getElementById("compress-terminal-meta");
-      const log = data.log || "";
-      const show = Boolean(data.running || log);
-      wrap.classList.toggle("hidden", !show);
-      if (!show) return;
-      const tailed = tailLines(log || "Waiting for output…");
-      term.textContent = tailed.text;
-      const lineCount = data.log_lines ?? tailed.total;
-      const tailNote = tailed.truncated ? ` · last ${LOG_DISPLAY_LIMIT}/${lineCount} lines` : "";
-      meta.textContent = data.running
-        ? `live · ${lineCount} lines${tailNote}`
-        : data.phase === "stopped"
-          ? `stopped${tailNote}`
-          : `exit ${data.exit_code ?? "—"}${tailNote}`;
-      if (data.running) {
-        term.scrollTop = term.scrollHeight;
-      }
-    }
-
-    async function pollCompressStatus() {
+      const countEl = document.getElementById("sidebar-video-count");
+      if (countEl) countEl.textContent = "Loading…";
       try {
-        const res = await fetch("/api/compress-status");
+        const res = await fetch("/api/videos");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-        const cls = compressStatusClass(data);
-        setCompressStatus(data, cls);
-        renderCompressTerminal(data);
-        updateCompressButtons(Boolean(data.running));
-        if (data.running) {
-          compressPollTimer = setTimeout(pollCompressStatus, 400);
-          return;
-        }
-        compressPollTimer = null;
-        updateCompressButtons(false);
-        document.getElementById("compress-btn").disabled = false;
-        await loadVideos(videoSelect.value);
+        catalog = data.videos || [];
+        populateSelect(preferredName);
+        renderVideoSidebar(preferredName || videoSelect.value);
       } catch (err) {
-        console.error(err);
-        updateCompressButtons(false);
-        document.getElementById("compress-btn").disabled = false;
-      }
-    }
-
-    async function initCompressMonitor() {
-      try {
-        const res = await fetch("/api/compress-status");
-        const data = await res.json();
-        if (!data.running && !(data.log || "").trim()) return;
-        const cls = compressStatusClass(data);
-        setCompressStatus(data, cls);
-        renderCompressTerminal(data);
-        if (data.running) {
-          updateCompressButtons(true);
-          pollCompressStatus();
-        }
-      } catch (err) {
-        console.error(err);
-      }
-    }
-
-    async function startCompress() {
-      const btn = document.getElementById("compress-btn");
-      const videos = selectedVideoNames();
-      if (!videos.length) {
-        setCompressStatus({ message: "Select at least one video" }, "error");
-        return;
-      }
-      const codec_mode = document.getElementById("codec-mode").value;
-      const vmaf_threshold = Number(document.getElementById("vmaf-threshold").value);
-      const target_bitrate = document.getElementById("target-bitrate").value.trim();
-      const target_compression_rate = parseCompressionRate(
-        document.getElementById("target-compression-rate").value
-      );
-      if (codec_mode === "vbr") {
-        if (Number.isNaN(target_compression_rate)) {
-          setCompressStatus({ message: "Target compression rate must be in (0, 1)" }, "error");
-          return;
-        }
-        if (!target_bitrate && target_compression_rate == null) {
-          setCompressStatus(
-            { message: "VBR needs target bitrate or target compression rate" },
-            "error"
-          );
-          return;
-        }
-      }
-      btn.disabled = true;
-      updateCompressButtons(true);
-      setCompressStatus({ message: "Starting compression…" }, "running");
-      renderCompressTerminal({ running: true, log: "", exit_code: null });
-      try {
-        const body = { codec_mode, vmaf_threshold, videos, encode_params: collectEncodeParams() };
-        if (codec_mode === "vbr") {
-          if (target_bitrate) body.target_bitrate = target_bitrate;
-          if (target_compression_rate != null) {
-            body.target_compression_rate = target_compression_rate;
-          }
-        }
-        const res = await fetch("/api/compress", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setCompressStatus({ message: data.error || "Compression request failed" }, "error");
-          updateCompressButtons(false);
-          btn.disabled = false;
-          return;
-        }
-        if (!data.started && data.status) {
-          setCompressStatus(data.status, compressStatusClass(data.status));
-        }
-        pollCompressStatus();
-      } catch (err) {
-        setCompressStatus({ message: `Compression failed: ${err}` }, "error");
-        updateCompressButtons(false);
-        btn.disabled = false;
-      }
-    }
-
-    async function stopCompress() {
-      const btn = document.getElementById("compress-stop-btn");
-      btn.disabled = true;
-      try {
-        const res = await fetch("/api/compress-stop", { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) {
-          setCompressStatus(
-            { message: data.error || `Stop failed (${res.status})` },
-            "error"
-          );
-          return;
-        }
-        const status = data.status || data;
-        setCompressStatus(status, compressStatusClass(status));
-        renderCompressTerminal(status);
-        if (status.running) {
-          pollCompressStatus();
-        } else {
-          updateCompressButtons(false);
-          document.getElementById("compress-btn").disabled = false;
-        }
-      } catch (err) {
-        setCompressStatus({ message: `Stop failed: ${err}` }, "error");
-      } finally {
-        btn.disabled = false;
+        catalog = [];
+        if (countEl) countEl.textContent = "Failed to load";
+        console.error("loadVideos failed", err);
+        setAnalyzeVideoStatus(`Video list failed: ${err}`, "error");
       }
     }
 
@@ -1606,33 +2477,422 @@
       }
     }
 
-    videoSelect.addEventListener("change", () => selectVideo(videoSelect.value));
-    document.getElementById("compressed-only").addEventListener("change", () => populateSelect(videoSelect.value));
+    let segmentGridCatalog = [];
+
+    function catalogSegLabel(v) {
+      const exp = v.expected_n_segments;
+      const segPart = exp ? `${v.n_segments}/${exp} seg` : `${v.n_segments} seg`;
+      const warn = v.incomplete ? " ⚠" : "";
+      const src = v.method_label ? ` [${v.method_label}]` : "";
+      return `${segPart}${warn}${src}`;
+    }
+
+    function findCatalogItem(key) {
+      if (!key) return null;
+      return segmentGridCatalog.find((v) =>
+        v.catalog_key === key ||
+        v.video_stem === key ||
+        (v.catalog_key && v.catalog_key.endsWith(`|${key}`))
+      ) || null;
+    }
+
+    function catalogOptionValue(v) {
+      return v.catalog_key || `merged|${v.video_stem}`;
+    }
+
+    function pickCatalogKeyForStem(stem) {
+      const hit = findCatalogItem(stem);
+      return hit ? catalogOptionValue(hit) : null;
+    }
+
+    function refillGridVideoSelect(preferKey) {
+      const videoSel = document.getElementById("grid-video");
+      const items = segmentGridCatalog;
+      const prevKey = preferKey || videoSel.value;
+      const prevHit = findCatalogItem(prevKey);
+      videoSel.innerHTML = "";
+      if (!items.length) {
+        videoSel.innerHTML = '<option value="">No sweep results yet</option>';
+        document.getElementById("grid-segment").innerHTML = '<option value="">—</option>';
+        return;
+      }
+      for (const v of items) {
+        const opt = document.createElement("option");
+        opt.value = catalogOptionValue(v);
+        opt.textContent =
+          `${v.video_stem.slice(0, 12)}… (${catalogSegLabel(v)}, ${v.n_ok} trials)`;
+        opt.title = `${v.video_stem} — sources: ${(v.sources || []).join(", ")}`;
+        videoSel.appendChild(opt);
+      }
+      let want = prevHit ? catalogOptionValue(prevHit) : catalogOptionValue(items[0]);
+      if (!items.some((v) => catalogOptionValue(v) === want)) {
+        want = catalogOptionValue(items[0]);
+      }
+      videoSel.value = want;
+    }
+
+    function setGridStatus(msg) {
+      document.getElementById("grid-status").textContent = msg || "";
+    }
+
+    function fmtNum(v, digits = 4) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
+      const n = Number(v);
+      return Number.isInteger(n) ? String(n) : n.toFixed(digits);
+    }
+
+    async function loadSegmentGridCatalog(preferStem) {
+      const videoSel = document.getElementById("grid-video");
+      setGridStatus("Loading grid results…");
+      try {
+        const res = await fetch("/api/segment-grid/videos");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "failed");
+        segmentGridCatalog = data.videos || [];
+        if (!segmentGridCatalog.length) {
+          videoSel.innerHTML = '<option value="">No sweep results yet</option>';
+          document.getElementById("grid-segment").innerHTML = '<option value="">—</option>';
+          setGridStatus("No segment sweeps found under work/");
+          return;
+        }
+        const preferKey = preferStem ? pickCatalogKeyForStem(preferStem) : null;
+        refillGridVideoSelect(preferKey);
+        fillGridSegments();
+        const incomplete = segmentGridCatalog.filter((v) => v.incomplete).length;
+        setGridStatus(
+          `${segmentGridCatalog.length} video(s) · grid+adaptive merged` +
+          (incomplete ? ` · ${incomplete} with incomplete segments` : "")
+        );
+        await loadSegmentGridSurface();
+      } catch (err) {
+        videoSel.innerHTML = '<option value="">Error</option>';
+        setGridStatus(`Failed to load grid catalog: ${err}`);
+      }
+    }
+
+    function selectedGridCatalogItem() {
+      const key = document.getElementById("grid-video").value;
+      return findCatalogItem(key);
+    }
+
+    function fillGridSegments() {
+      const segSel = document.getElementById("grid-segment");
+      const item = selectedGridCatalogItem();
+      segSel.innerHTML = "";
+      if (!item || !(item.segments || []).length) {
+        segSel.innerHTML = '<option value="">—</option>';
+        return;
+      }
+      for (const s of item.segments || []) {
+        const opt = document.createElement("option");
+        opt.value = String(s.segment_index);
+        const roots = s.per_root
+          ? Object.entries(s.per_root).map(([k, n]) => `${k}:${n}`).join(" ")
+          : "";
+        opt.textContent = roots
+          ? `seg ${s.segment_index}  (${s.n_ok} merged${roots ? ` · ${roots}` : ""})`
+          : `seg ${s.segment_index}  (${s.n_ok}/${s.n_trials} ok)`;
+        segSel.appendChild(opt);
+      }
+      if (segSel.options.length && !segSel.value) {
+        segSel.selectedIndex = 0;
+      }
+    }
+
+    function renderGridBest(payload) {
+      const el = document.getElementById("grid-best");
+      const b = payload.best;
+      if (!b) {
+        el.innerHTML = "";
+        return;
+      }
+      el.innerHTML = `
+        <div class="stat"><div class="label">Best CRF</div><div class="value">${b.crf}</div></div>
+        <div class="stat"><div class="label">Best AQ</div><div class="value">${fmtNum(b.aq_strength, 1)}</div></div>
+        <div class="stat"><div class="label">s_f</div><div class="value">${fmtNum(b.s_f)}</div></div>
+        <div class="stat"><div class="label">VMAF NEG</div><div class="value">${fmtNum(b.vmaf_neg, 2)}</div></div>
+        <div class="stat"><div class="label">VMAF base</div><div class="value">${fmtNum(b.vmaf_base, 2)}</div></div>
+        <div class="stat"><div class="label">Ratio</div><div class="value">${fmtNum(b.compression_ratio, 2)}×</div></div>
+      `;
+    }
+
+    function renderGridTrials(trials) {
+      const wrap = document.getElementById("grid-trials-wrap");
+      const body = document.querySelector("#grid-trials-table tbody");
+      body.innerHTML = "";
+      if (!trials || !trials.length) {
+        wrap.classList.add("hidden");
+        return;
+      }
+      wrap.classList.remove("hidden");
+      for (const t of trials) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${t.crf}</td>
+          <td>${fmtNum(t.aq_strength, 1)}</td>
+          <td>${fmtNum(t.s_f)}</td>
+          <td>${fmtNum(t.vmaf_neg, 2)}</td>
+          <td>${fmtNum(t.vmaf_base, 2)}</td>
+          <td>${fmtNum(t.compression_rate)}</td>
+          <td>${fmtNum(t.compression_ratio, 2)}</td>
+          <td>${t.gates_ok ? "yes" : "no"}</td>
+          <td title="${String(t.reason || "").replace(/"/g, "&quot;")}">${String(t.reason || "").slice(0, 40)}</td>`;
+        body.appendChild(tr);
+      }
+    }
+
+    function renderSegmentGrid3D(payload) {
+      const host = document.getElementById("segment-grid-plots");
+      if (typeof Plotly === "undefined") {
+        host.innerHTML = '<div class="empty">Plotly failed to load</div>';
+        return;
+      }
+      const crfs = payload.crfs || [];
+      const aqs = payload.aqs || [];
+      const surfaces = payload.surfaces || {};
+      const trials = payload.trials || [];
+      const sparse = Boolean(payload.sparse);
+      const hoverTemplateSurface =
+        "CRF=%{x}<br>aq=%{y:.1f}<br>" +
+        "s_f=%{customdata[0]:.4f}<br>" +
+        "ratio=%{customdata[1]:.2f}×<br>" +
+        "VMAF=%{customdata[2]:.2f}<extra></extra>";
+      const hoverTemplatePoints =
+        "CRF=%{x}<br>aq=%{y:.1f}<br>" +
+        "s_f=%{customdata[0]:.4f}<br>" +
+        "ratio=%{customdata[1]:.2f}×<br>" +
+        "VMAF=%{customdata[2]:.2f}<br>" +
+        "gates=%{customdata[3]}<extra></extra>";
+      const surfaceCustomdata = aqs.map((_, ai) =>
+        crfs.map((_, ci) => [
+          surfaces.s_f?.[ai]?.[ci],
+          surfaces.compression_ratio?.[ai]?.[ci],
+          surfaces.vmaf_neg?.[ai]?.[ci],
+        ])
+      );
+      const pointCustomdata = trials.map((t) => [
+        t.s_f,
+        t.compression_ratio,
+        t.vmaf_neg != null ? t.vmaf_neg : t.vmaf_base,
+        t.gates_ok ? "yes" : "no",
+      ]);
+      const panels = [
+        { key: "s_f", title: "final score (s_f)", colorscale: "Plasma" },
+        { key: "compression_ratio", title: "compression ratio", colorscale: "Viridis" },
+        { key: "vmaf_neg", title: "VMAF NEG", colorscale: "RdBu" },
+      ];
+      const traces = [];
+      const layoutScenes = {};
+      panels.forEach((p, idx) => {
+        const z = surfaces[p.key] || [];
+        const scene = idx === 0 ? "scene" : `scene${idx + 1}`;
+        if (!sparse) {
+          traces.push({
+            type: "surface",
+            x: crfs,
+            y: aqs,
+            z,
+            customdata: surfaceCustomdata,
+            colorscale: p.colorscale,
+            showscale: true,
+            colorbar: { title: p.title, len: 0.55, y: 0.5, x: 0.30 + idx * 0.34 },
+            scene,
+            name: p.title,
+            hovertemplate: hoverTemplateSurface,
+          });
+        }
+        const xs = trials.map((t) => t.crf);
+        const ys = trials.map((t) => t.aq_strength);
+        const zs = trials.map((t) => t[p.key]);
+        if (xs.length) {
+          traces.push({
+            type: "scatter3d",
+            x: xs,
+            y: ys,
+            z: zs,
+            mode: "markers",
+            customdata: pointCustomdata,
+            marker: {
+              size: sparse ? 3.5 : 2,
+              color: zs,
+              colorscale: p.colorscale,
+              showscale: sparse,
+              colorbar: sparse
+                ? { title: p.title, len: 0.55, y: 0.5, x: 0.30 + idx * 0.34 }
+                : undefined,
+              opacity: sparse ? 0.95 : 0.55,
+            },
+            scene,
+            name: sparse ? p.title : `${p.title} points`,
+            hovertemplate: hoverTemplatePoints,
+          });
+        }
+        const best = payload.best;
+        if (best && best[p.key] != null) {
+          traces.push({
+            type: "scatter3d",
+            x: [best.crf],
+            y: [best.aq_strength],
+            z: [best[p.key]],
+            mode: "markers+text",
+            marker: { color: "#ff5555", size: 4 },
+            text: [`best ${best.crf}/${Number(best.aq_strength).toFixed(1)}`],
+            textposition: "top center",
+            scene,
+            showlegend: false,
+            hoverinfo: "skip",
+          });
+        }
+        layoutScenes[scene] = {
+          domain: { x: [idx / 3 + 0.02, (idx + 1) / 3 - 0.01], y: [0.05, 0.95] },
+          xaxis: { title: "CRF" },
+          yaxis: { title: "aq-strength" },
+          zaxis: { title: p.title },
+          camera: { eye: { x: 1.6, y: 1.6, z: 1.2 } },
+        };
+      });
+      const layout = {
+        title: `${payload.video_stem} · seg ${payload.segment_index} · ${payload.n_ok} trials`,
+        height: 520,
+        margin: { l: 0, r: 0, t: 48, b: 0 },
+        paper_bgcolor: "rgba(0,0,0,0)",
+        font: { color: "#c9d1d9", size: 11 },
+        showlegend: false,
+        hoverlabel: {
+          bgcolor: "rgba(20, 24, 32, 0.92)",
+          bordercolor: "rgba(255,255,255,0.15)",
+          font: { color: "#e6edf3", size: 12 },
+        },
+        annotations: panels.map((p, idx) => ({
+          text: p.title,
+          xref: "paper",
+          yref: "paper",
+          x: (idx + 0.5) / 3,
+          y: 1.02,
+          showarrow: false,
+          font: { size: 12, color: "#c9d1d9" },
+        })),
+        ...layoutScenes,
+      };
+      Plotly.react(host, traces, layout, { responsive: true, displayModeBar: true });
+    }
+
+    async function loadSegmentGridSurface() {
+      const item = selectedGridCatalogItem();
+      const seg = document.getElementById("grid-segment").value;
+      const gates = document.getElementById("grid-gates-only").checked;
+      if (!item || seg === "" || seg == null) {
+        setGridStatus("Pick a video and segment first");
+        return;
+      }
+      const stem = item.video_stem;
+      setGridStatus(`Loading ${stem} seg ${seg} [merged]…`);
+      try {
+        const params = new URLSearchParams();
+        if (gates) params.set("gates_only", "1");
+        params.set("source_root", "merged");
+        const qs = params.toString() ? `?${params}` : "";
+        const res = await fetch(
+          `/api/segment-grid/${encodeURIComponent(stem)}/${encodeURIComponent(seg)}${qs}`
+        );
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "failed");
+        renderGridBest(data);
+        renderSegmentGrid3D(data);
+        renderGridTrials(data.trials || []);
+        const crfSpan = data.crfs?.length ? `${data.crfs[0]}–${data.crfs[data.crfs.length - 1]}` : "—";
+        const aqSpan = data.aqs?.length ? `${data.aqs[0]}–${data.aqs[data.aqs.length - 1]}` : "—";
+        setGridStatus(
+          `${data.n_ok}/${data.n_trials} encode_ok · CRF ${crfSpan} · AQ ${aqSpan}` +
+          (data.sparse ? " · mixed/sparse" : " · merged") +
+          (data.sources?.length ? ` · ${data.sources.map((s) => s.replace("segment_crf_aq_", "")).join("+")}` : "")
+        );
+      } catch (err) {
+        document.getElementById("segment-grid-plots").innerHTML = "";
+        document.getElementById("grid-best").innerHTML = "";
+        document.getElementById("grid-trials-wrap").classList.add("hidden");
+        setGridStatus(`Failed: ${err}`);
+      }
+    }
+
+    async function initSegmentAnalyzeMonitor() {
+      try {
+        const res = await fetch("/api/segment-analyze-status");
+        const data = await res.json();
+        if (!data.running && data.phase !== "done" && data.phase !== "error") return;
+        const cls = data.running
+          ? "running"
+          : (data.phase === "error" ? "error" : (data.phase === "done" ? "done" : ""));
+        setAnalyzeVideoStatus(data.message || "", cls);
+        if (data.result) renderSegments(data.result);
+        if (data.running) {
+          document.getElementById("analyze-video-btn").disabled = true;
+          pollSegmentAnalyze();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    videoSelect.addEventListener("change", () => {
+      selectVideo(videoSelect.value);
+      highlightSidebarVideo(videoSelect.value);
+    });
+    document.getElementById("analyze-video-btn").addEventListener("click", startVideoAnalyze);
+    document.getElementById("seg-feature-btn").addEventListener("click", runFeatureBasedCandidates);
+    document.getElementById("seg-compress-btn").addEventListener("click", startSegmentCompress);
+    document.getElementById("seg-ml-candidate-btn").addEventListener("click", () => {
+      setSegActionStatus("ML candidate is not ready yet", "error");
+    });
+    document.getElementById("compressed-only").addEventListener("change", () => {
+      populateSelect(videoSelect.value);
+      renderVideoSidebar(videoSelect.value);
+    });
+    document.getElementById("sidebar-video-search").addEventListener("input", () => {
+      renderVideoSidebar(videoSelect.value);
+    });
     document.getElementById("fetch-challenges").addEventListener("click", startFetch);
     document.getElementById("refresh-videos").addEventListener("click", () => loadVideos(videoSelect.value));
-    document.getElementById("codec-mode").addEventListener("change", toggleTargetBitrateField);
-    document.getElementById("encoder").addEventListener("change", toggleEncoderFields);
-    document.getElementById("select-videos").addEventListener("click", () => {
-      selectVideos(Number(document.getElementById("select-count").value) || 5);
-    });
-    document.getElementById("video-checklist").addEventListener("change", updateSelectedCount);
-    document.getElementById("compress-btn").addEventListener("click", startCompress);
-    document.getElementById("compress-stop-btn").addEventListener("click", stopCompress);
     document.getElementById("analyze-btn").addEventListener("click", runAnalyze);
     document.getElementById("analyze-search").addEventListener("click", runAnalyzeSearch);
     document.getElementById("analyze-clear").addEventListener("click", clearAnalyze);
     document.getElementById("analyze-sort").addEventListener("change", () => {
       runAnalyzeSearch();
     });
-    toggleTargetBitrateField();
-    loadEncodeDefaults();
+    document.getElementById("grid-video").addEventListener("change", () => {
+      fillGridSegments();
+      loadSegmentGridSurface();
+    });
+    document.getElementById("grid-refresh").addEventListener("click", () => loadSegmentGridCatalog());
+    document.getElementById("grid-load").addEventListener("click", loadSegmentGridSurface);
+    document.getElementById("grid-segment").addEventListener("change", loadSegmentGridSurface);
+    document.getElementById("grid-gates-only").addEventListener("change", loadSegmentGridSurface);
     bindSync();
-    initFetchMonitor();
-    initCompressMonitor();
-    initAnalyzeMonitor();
-    loadVideos();
-    refreshSystem();
-    setInterval(refreshSystem, 3000);
+    // Load order: system → segment grid catalog → videos.
+    (async () => {
+      try {
+        await refreshSystem();
+      } catch (err) {
+        console.error(err);
+      }
+      try {
+        await loadSegmentGridCatalog();
+        if (document.getElementById("grid-video").value) {
+          await loadSegmentGridSurface();
+        }
+      } catch (err) {
+        console.error(err);
+      }
+      try {
+        await loadVideos();
+      } catch (err) {
+        console.error(err);
+      }
+      initFetchMonitor();
+      initAnalyzeMonitor();
+      initSegmentAnalyzeMonitor();
+    })();
+    setInterval(refreshSystem, 5000);
   </script>
 </body>
 </html>

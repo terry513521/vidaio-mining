@@ -70,7 +70,7 @@ def main() -> int:
     parser.add_argument(
         "--out-dir",
         type=Path,
-        default=Path(r"C:\Users\com\Documents\workspace\video\validation_videos"),
+        default=Path(__file__).resolve().parent.parent / "raw videos",
     )
     parser.add_argument(
         "--limit",

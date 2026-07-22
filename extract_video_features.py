@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 
@@ -154,7 +154,10 @@ def build_segment_stats(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "entropy": _safe_float(seg.get("entropy")),
                 "hf_energy": _safe_float(seg.get("high_freq_energy")),
                 "flatness": _safe_float(seg.get("flatness")),
+                "si": _safe_float(seg.get("si")),
+                "ti": _safe_float(seg.get("ti")),
                 "luma_mean": _safe_float(seg.get("luma_mean")),
+                "sat_mean": _safe_float(seg.get("sat_mean")),
                 "difficulty": _safe_float(seg.get("difficulty")),
             }
         )
@@ -206,12 +209,55 @@ def build_distributions(
     }
 
 
-def extract_features(video_path: Path) -> dict[str, Any]:
+def extract_features(
+    video_path: Path,
+    *,
+    scene_detector: str = "content",
+    scene_threshold: Optional[float] = None,
+    min_scene_len_sec: float = 0.4,
+    use_builtin_cuts: bool = False,
+    samples_per_segment: int = 16,
+) -> dict[str, Any]:
+    """Extract features; default cuts from PySceneDetect ContentDetector.
+
+    Set ``use_builtin_cuts=True`` to use the legacy histogram/diff cut detector
+    inside ``HEVCFeatureExtractor`` instead of PySceneDetect.
+    """
     started = time.perf_counter()
-    full = HEVCFeatureExtractor(str(video_path)).extract_full()
+    scene_spans: Optional[list[tuple[float, float]]] = None
+    detect_meta: dict[str, Any] = {"detector": "builtin"}
+
+    if not use_builtin_cuts:
+        from scene_detect import detect_scenes
+
+        det = detect_scenes(
+            str(video_path),
+            detector="adaptive" if str(scene_detector).lower().startswith("adapt") else "content",
+            threshold=scene_threshold,
+            min_scene_len_sec=float(min_scene_len_sec),
+        )
+        scene_spans = det.spans
+        detect_meta = {
+            "detector": det.detector or scene_detector,
+            "ok": bool(det.ok),
+            "error": det.error,
+            "detect_sec": round(float(det.detect_sec), 3),
+            "n_scenes": len(det.scenes),
+        }
+
+    full = HEVCFeatureExtractor(
+        str(video_path),
+        samples_per_segment=int(samples_per_segment),
+    ).extract_full(scene_spans=scene_spans)
     segments = full.get("segments") or []
     summary = full.get("summary") or {}
     meta = full.get("meta") or {}
+    meta = {
+        **meta,
+        "scene_detect": detect_meta,
+        "samples_per_segment": int(samples_per_segment),
+        "si_ti_agg": "mean",
+    }
     elapsed = time.perf_counter() - started
 
     return {
@@ -256,6 +302,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="*.mp4",
         help="Glob under --input (default: *.mp4)",
     )
+    p.add_argument(
+        "--scene-detector",
+        choices=["content", "adaptive", "builtin"],
+        default="content",
+        help=(
+            "Cut detector: content=PySceneDetect ContentDetector (default), "
+            "adaptive=AdaptiveDetector, builtin=legacy histogram/diff cuts"
+        ),
+    )
+    p.add_argument(
+        "--scene-threshold",
+        type=float,
+        default=None,
+        help="Optional detector threshold (ContentDetector default 27)",
+    )
+    p.add_argument(
+        "--min-scene-len",
+        type=float,
+        default=0.4,
+        help="Minimum scene length in seconds (default: 0.4)",
+    )
     return p.parse_args(argv)
 
 
@@ -288,7 +355,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         print(f"[{index}/{len(videos)}] extract {video.name} …", flush=True)
         try:
-            payload = extract_features(video)
+            payload = extract_features(
+                video,
+                scene_detector=str(args.scene_detector),
+                scene_threshold=args.scene_threshold,
+                min_scene_len_sec=float(args.min_scene_len),
+                use_builtin_cuts=(str(args.scene_detector) == "builtin"),
+            )
             dest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
             ok += 1
             g = payload["global"]
