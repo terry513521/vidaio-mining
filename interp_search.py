@@ -1396,7 +1396,7 @@ def propose_feature_x265_params(
         "aq-strength": aq_strength,
         "rd": 6 if quality_pack else 5,
         "ref": 5 if quality_pack else 4,
-        "bframes": 6,
+        "bframes": 8,
         "rc-lookahead": 40,
         "keyint": 48,
         "min-keyint": 1,
@@ -1406,7 +1406,7 @@ def propose_feature_x265_params(
 
     # Motion: B-frames + lookahead + refs.
     if motion >= 0.52:
-        out["bframes"] = 8 if quality_pack else 7
+        out["bframes"] = 8
         out["rc-lookahead"] = 60 if fps_v >= 50 else 50
         out["ref"] = max(int(out["ref"]), 5)
         reasons.append(
@@ -1414,10 +1414,10 @@ def propose_feature_x265_params(
             f"lookahead={out['rc-lookahead']}, ref={out['ref']}"
         )
     elif motion >= 0.48:
-        out["bframes"] = 6
+        out["bframes"] = 8
         out["rc-lookahead"] = 40 if fps_v < 50 else 50
         reasons.append(
-            f"motion={motion:.2f} → bframes=6, lookahead={out['rc-lookahead']}"
+            f"motion={motion:.2f} → bframes=8, lookahead={out['rc-lookahead']}"
         )
     elif motion < 0.45 and noise < 0.48:
         out["bframes"] = 4

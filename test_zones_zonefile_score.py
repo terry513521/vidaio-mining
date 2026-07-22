@@ -6,6 +6,9 @@ Default ``--zone-apply segments``: encode each zone with **full** zonefile param
 ``libx265``, then concat. This is required for true per-zone AQ/analysis on
 Ubuntu x265/libx265 3.5 (native ``--zonefile`` ignores those overrides).
 
+Each segment encode uses **scene-as-one-GOP**: ``keyint=min-keyint=frame_count``,
+``scenecut=0`` (overrides ``--x265-args`` keyint/scenecut).
+
 **Prefer ``--crf`` per zone** when using AQ: under ``--qp`` (CQP), x265 ignores
 ``aq-strength`` / ``aq-mode`` (identical bitstream). CRF enables AQ.
 
@@ -47,6 +50,7 @@ from typing import Any, Optional
 from extract_video_features import extract_features
 from ffmpeg_tools import resolve_binary
 from scoring import NEG_MODEL, BASE_MODEL, compute_vmaf, score_candidate
+from segment_crf_aq_grid_sweep import apply_scene_as_gop
 
 
 _X265_PRESETS = [
@@ -132,8 +136,11 @@ def parse_args() -> argparse.Namespace:
                    help="Default x265 preset (overridden by --preset on zonefile lines in segments mode)")
     p.add_argument(
         "--x265-args",
-        default="--keyint 60 --min-keyint 1 --scenecut 40 --bframes 6 --rc-lookahead 40",
-        help="Extra global x265 CLI args",
+        default="--bframes 8 --rc-lookahead 40",
+        help=(
+            "Extra global x265 CLI args. In segments mode, keyint/min-keyint/scenecut "
+            "are overridden per zone (scene-as-one-GOP)."
+        ),
     )
     p.add_argument(
         "--zone-apply",
@@ -672,6 +679,9 @@ def _encode_one_zone_segment(
             merged[k] = v
         else:
             merged[p] = "1"
+    # One GOP for the whole zone clip (I at start; no mid-zone scenecuts).
+    frame_count = max(1, int(ef) - int(sf))
+    merged = apply_scene_as_gop(merged, frame_count=frame_count)
     param_str = ":".join(f"{k}={v}" for k, v in merged.items())
 
     cmd = [
@@ -764,11 +774,12 @@ def _encode_segments_libx265(
     ffmpeg = resolve_binary("ffmpeg", None)
     output.parent.mkdir(parents=True, exist_ok=True)
     base_params = _x265_cli_args_to_params(x265_args)
-    # Prefer closed GOPs at segment starts for clean concat
-    if not any(p.startswith("keyint=") for p in base_params):
-        base_params.append("keyint=60")
-    if not any(p.startswith("min-keyint=") for p in base_params):
-        base_params.append("min-keyint=1")
+    # Per-zone scene-as-one-GOP is applied in _encode_one_zone_segment.
+    print(
+        "GOP        : scene-as-one per zone "
+        "(keyint=min-keyint=frame_count, scenecut=0)",
+        flush=True,
+    )
 
     workers = max(1, min(int(zone_workers), len(zones)))
     if workers > 1:

@@ -1,8 +1,8 @@
 {
   "video": "05df21f7-3f8e-4529-b834-e73f2828ba1d.mp4",
   "path": "/root/workspace/raw videos/05df21f7-3f8e-4529-b834-e73f2828ba1d.mp4",
-  "extracted_at": "2026-07-21T16:41:39Z",
-  "elapsed_sec": 142.069,
+  "extracted_at": "2026-07-22T11:38:44Z",
+  "elapsed_sec": 141.355,
   "meta": {
     "path": "../raw videos/05df21f7-3f8e-4529-b834-e73f2828ba1d.mp4",
     "width": 3840,
@@ -17,7 +17,7 @@
       "detector": "content",
       "ok": true,
       "error": "",
-      "detect_sec": 54.214,
+      "detect_sec": 39.163,
       "n_scenes": 6
     },
     "samples_per_segment": 16,

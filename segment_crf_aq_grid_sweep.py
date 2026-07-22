@@ -180,6 +180,16 @@ def _parse_segments(video_dir: Path) -> list[dict[str, Any]]:
     return segs
 
 
+def apply_scene_as_gop(params: dict[str, str], *, frame_count: int) -> dict[str, str]:
+    """Force one GOP for the whole segment: keyint=min-keyint=N, scenecut=0."""
+    n = max(1, int(frame_count))
+    out = dict(params)
+    out["keyint"] = str(n)
+    out["min-keyint"] = str(n)
+    out["scenecut"] = "0"
+    return out
+
+
 def _find_raw_video(stem: str, raw_dir: Path) -> Optional[Path]:
     for ext in (".mp4", ".mov", ".mkv", ".webm"):
         p = raw_dir / f"{stem}{ext}"
@@ -282,7 +292,10 @@ def _run_trial(
     source_segment_bytes: int,
 ) -> TrialRow:
     seg_path: Path = seg["path"]
-    params = dict(base_params)
+    params = apply_scene_as_gop(
+        dict(base_params),
+        frame_count=int(seg.get("frame_count") or (int(seg["end_frame"]) - int(seg["start_frame"]))),
+    )
     params["aq-strength"] = f"{round(float(aq), 3):g}"
     params_str = format_x265_params(params)
     src_bytes = max(0, int(source_segment_bytes))
@@ -736,6 +749,7 @@ def main() -> int:
         f"video_parallel={video_workers}  per_video={workers_per_video}"
     )
     print(f"preset     : {args.preset}")
+    print("GOP        : scene-as-one (keyint=min-keyint=frame_count, scenecut=0)")
     print(
         f"vmaf       : thr={args.vmaf_threshold} "
         f"backend={'GPU' if args.gpu else 'CPU'} threads/job={vmaf_n_threads}"

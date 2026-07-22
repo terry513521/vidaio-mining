@@ -54,7 +54,7 @@ _X265_PRESETS = [
 
 DEFAULT_BASE_PARAMS = (
     "aq-mode=2:rd=6:ref=6:rdoq-level=2:me=hex:subme=2:merange=57:"
-    "max-merge=3:bframes=6:rc-lookahead=40:keyint=60:min-keyint=1:scenecut=40"
+    "max-merge=3:bframes=8:rc-lookahead=40:keyint=60:min-keyint=1:scenecut=40"
 )
 
 _write_lock = threading.Lock()

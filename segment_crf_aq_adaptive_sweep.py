@@ -46,6 +46,7 @@ from segment_crf_aq_grid_sweep import (
     _parse_segments,
     _run_trial,
     _source_segment_packet_bytes,
+    apply_scene_as_gop,
 )
 from test_crf_aq_sweep import DEFAULT_BASE_PARAMS, _completed_keys
 
@@ -142,13 +143,24 @@ def _resolve_segment_base_params(
     features_dir: Path,
     fixed_base_params: dict[str, str],
 ) -> tuple[dict[str, str], str]:
-    """Return (x265 params without crf/aq-strength, source label)."""
+    """Return (x265 params without crf/aq-strength, source label).
+
+    Always applies scene-as-one-GOP from the segment frame count.
+    """
+    frame_count = int(
+        seg.get("frame_count")
+        or (int(seg["end_frame"]) - int(seg["start_frame"]))
+    )
+
+    def _with_gop(params: dict[str, str], src: str) -> tuple[dict[str, str], str]:
+        return apply_scene_as_gop(params, frame_count=frame_count), src
+
     if not use_feature_params:
-        return dict(fixed_base_params), "fixed"
+        return _with_gop(dict(fixed_base_params), "fixed")
 
     feat_json = _load_video_features(stem, features_dir)
     if feat_json is None:
-        return dict(fixed_base_params), "fixed_fallback"
+        return _with_gop(dict(fixed_base_params), "fixed_fallback")
 
     meta = feat_json.get("meta") or {}
     global_ = feat_json.get("global") or {}
@@ -159,14 +171,14 @@ def _resolve_segment_base_params(
             seg_row = row
             break
     if seg_row is None:
-        return dict(fixed_base_params), "fixed_fallback"
+        return _with_gop(dict(fixed_base_params), "fixed_fallback")
 
     feat_dict = _segment_feat_dict_for_params(seg_row, meta=meta, global_=global_)
     fps = float(feat_dict.get("fps") or 30.0)
     params, _reasons = propose_feature_x265_params(feat_dict, fps=fps, quality_pack=False)
     params.pop("crf", None)
     params.pop("aq-strength", None)
-    return {k: str(v) for k, v in params.items()}, "features"
+    return _with_gop({k: str(v) for k, v in params.items()}, "features")
 
 
 def _trial_key(crf: int, aq: float) -> tuple[int, float]:
@@ -455,12 +467,9 @@ class AqIntervalSearcher:
             self.bracket_hi = (AQ_START_LOW, AQ_START_MID)
             return
 
-        # both invalid
+        # both invalid — probe AQ_MAX next (handled in probe_top phase)
         self.phase = "probe_top"
-        if not self._checked_top:
-            self._checked_top = True
-            if _round_aq(AQ_MAX) not in self.tested:
-                self.seed_queue.append(_round_aq(AQ_MAX))
+        self._checked_top = True
 
     def _after_probe_top(self) -> None:
         v_top = self._valid(AQ_MAX)
@@ -529,112 +538,137 @@ class AqIntervalSearcher:
         return v_a and (not v_b)
 
     def next_aq(self) -> Optional[float]:
-        if len(self.tested) >= self.max_probes:
+        # Iterative phase machine — avoid recursive next_aq() (easy infinite loop).
+        for _ in range(self.max_probes + 8):
+            if len(self.tested) >= self.max_probes:
+                self.phase = "done"
+                return None
+            if self.phase == "done" or self.empty_interval:
+                return None
+
+            if self.phase == "seed":
+                while self.seed_queue:
+                    aq = _round_aq(self.seed_queue.pop(0))
+                    if aq not in self.tested:
+                        return aq
+                prev = self.phase
+                self._setup_brackets_after_seeds()
+                if self.phase == prev and self.phase == "seed":
+                    self.phase = "done"
+                    return None
+                continue
+
+            if self.phase == "probe_top":
+                top = _round_aq(AQ_MAX)
+                if top not in self.tested:
+                    return top
+                prev = self.phase
+                self._after_probe_top()
+                if self.phase == prev:
+                    self.phase = "done"
+                    return None
+                continue
+
+            if self.phase == "probe_top_valid":
+                top = _round_aq(AQ_MAX)
+                if top not in self.tested:
+                    return top
+                prev = self.phase
+                self._after_probe_top_valid()
+                if self.phase == prev:
+                    self.phase = "done"
+                    return None
+                continue
+
+            if self.phase == "bracket_lo" and self.bracket_lo is not None:
+                aq_a, aq_b = self.bracket_lo
+                if self._bracket_resolved(self.bracket_lo, lo_valid=True):
+                    self.pass_lo = aq_b
+                    self.phase = "bracket_hi" if self.bracket_hi else "expand"
+                    if self.phase == "expand":
+                        self._begin_expand()
+                    continue
+                cand = self._interpolate_next(
+                    self.bracket_lo,
+                    target_metric="vmaf",
+                    target_value=self.vmaf_thr,
+                )
+                if cand is not None and cand in self.tested:
+                    self.pass_lo = aq_b if self._valid(aq_b) else aq_a
+                    self.phase = "bracket_hi" if self.bracket_hi else "expand"
+                    if self.phase == "expand":
+                        self._begin_expand()
+                    continue
+                if cand is not None and cand not in self.tested:
+                    return cand
+                bisect = _untested_mid(aq_a, aq_b, self.tested, step=self.expand_step)
+                if bisect is not None:
+                    return bisect
+                self.phase = "expand"
+                self._begin_expand()
+                continue
+
+            if self.phase == "bracket_hi" and self.bracket_hi is not None:
+                aq_a, aq_b = self.bracket_hi
+                v_a = self._valid(aq_a)
+                v_b = self._valid(aq_b)
+                if v_a and v_b:
+                    # Both ends pass — extrapolate/interpolate ratio crossing above aq_b.
+                    row_a = self._row(aq_a)
+                    row_b = self._row(aq_b)
+                    if row_a and row_b:
+                        _, r_a = _metrics(row_a)
+                        _, r_b = _metrics(row_b)
+                        cand = _interpolate_aq(aq_a, r_a, aq_b, r_b, self.ratio_thr)
+                        if cand is not None:
+                            if cand <= aq_b + 1e-9 and cand not in self.tested:
+                                return cand
+                            if cand > aq_b:
+                                nxt = _clamp_aq(cand)
+                                if nxt not in self.tested:
+                                    self.bracket_hi = (
+                                        aq_b,
+                                        min(AQ_MAX, _clamp_aq(aq_b + 1.1)),
+                                    )
+                                    return nxt
+                                if AQ_MAX not in self.tested:
+                                    return _round_aq(AQ_MAX)
+                    self.pass_hi = aq_b
+                    self.phase = "expand"
+                    self._begin_expand()
+                    continue
+
+                if self._bracket_resolved(self.bracket_hi, lo_valid=False):
+                    self.pass_hi = aq_a
+                    self.phase = "expand"
+                    self._begin_expand()
+                    continue
+                cand = self._interpolate_next(
+                    self.bracket_hi,
+                    target_metric="ratio",
+                    target_value=self.ratio_thr,
+                )
+                if cand is not None and cand in self.tested:
+                    self.pass_hi = aq_a if self._valid(aq_a) else aq_b
+                    self.phase = "expand"
+                    self._begin_expand()
+                    continue
+                if cand is not None and cand not in self.tested:
+                    return cand
+                bisect = _untested_mid(aq_a, aq_b, self.tested, step=self.expand_step)
+                if bisect is not None:
+                    return bisect
+                self.phase = "expand"
+                self._begin_expand()
+                continue
+
+            if self.phase == "expand":
+                return self._next_expand()
+
             self.phase = "done"
             return None
-        if self.phase == "done" or self.empty_interval:
-            return None
 
-        if self.phase == "seed":
-            while self.seed_queue:
-                aq = _round_aq(self.seed_queue.pop(0))
-                if aq not in self.tested:
-                    return aq
-            self._setup_brackets_after_seeds()
-            return self.next_aq()
-
-        if self.phase == "probe_top":
-            self._after_probe_top()
-            return self.next_aq()
-
-        if self.phase == "probe_top_valid":
-            if _round_aq(AQ_MAX) not in self.tested:
-                return _round_aq(AQ_MAX)
-            self._after_probe_top_valid()
-            return self.next_aq()
-
-        if self.phase == "bracket_lo" and self.bracket_lo is not None:
-            aq_a, aq_b = self.bracket_lo
-            if self._bracket_resolved(self.bracket_lo, lo_valid=True):
-                self.pass_lo = aq_b
-                self.phase = "bracket_hi" if self.bracket_hi else "expand"
-                if self.phase == "expand":
-                    self._begin_expand()
-                return self.next_aq()
-            cand = self._interpolate_next(
-                self.bracket_lo,
-                target_metric="vmaf",
-                target_value=self.vmaf_thr,
-            )
-            if cand is not None and cand in self.tested:
-                self.pass_lo = aq_b if self._valid(aq_b) else aq_a
-                self.phase = "bracket_hi" if self.bracket_hi else "expand"
-                if self.phase == "expand":
-                    self._begin_expand()
-                return self.next_aq()
-            if cand is not None and cand not in self.tested:
-                return cand
-            bisect = _untested_mid(aq_a, aq_b, self.tested, step=self.expand_step)
-            if bisect is not None:
-                return bisect
-            self.phase = "expand"
-            self._begin_expand()
-            return self.next_aq()
-
-        if self.phase == "bracket_hi" and self.bracket_hi is not None:
-            aq_a, aq_b = self.bracket_hi
-            v_a = self._valid(aq_a)
-            v_b = self._valid(aq_b)
-            if v_a and v_b:
-                # Both ends pass — extrapolate/interpolate ratio crossing above aq_b.
-                row_a = self._row(aq_a)
-                row_b = self._row(aq_b)
-                if row_a and row_b:
-                    _, r_a = _metrics(row_a)
-                    _, r_b = _metrics(row_b)
-                    cand = _interpolate_aq(aq_a, r_a, aq_b, r_b, self.ratio_thr)
-                    if cand is not None:
-                        if cand <= aq_b + 1e-9 and cand not in self.tested:
-                            return cand
-                        if cand > aq_b:
-                            nxt = _clamp_aq(cand)
-                            if nxt not in self.tested:
-                                self.bracket_hi = (aq_b, min(AQ_MAX, _clamp_aq(aq_b + 1.1)))
-                                return nxt
-                            if not self._valid(AQ_MAX) and AQ_MAX not in self.tested:
-                                return AQ_MAX
-                self.pass_hi = aq_b
-                self.phase = "expand"
-                self._begin_expand()
-                return self.next_aq()
-
-            if self._bracket_resolved(self.bracket_hi, lo_valid=False):
-                self.pass_hi = aq_a
-                self.phase = "expand"
-                self._begin_expand()
-                return self.next_aq()
-            cand = self._interpolate_next(
-                self.bracket_hi,
-                target_metric="ratio",
-                target_value=self.ratio_thr,
-            )
-            if cand is not None and cand in self.tested:
-                self.pass_hi = aq_a if self._valid(aq_a) else aq_b
-                self.phase = "expand"
-                self._begin_expand()
-                return self.next_aq()
-            if cand is not None and cand not in self.tested:
-                return cand
-            bisect = _untested_mid(aq_a, aq_b, self.tested, step=self.expand_step)
-            if bisect is not None:
-                return bisect
-            self.phase = "expand"
-            self._begin_expand()
-            return self.next_aq()
-
-        if self.phase == "expand":
-            return self._next_expand()
-
+        self.phase = "done"
         return None
 
     def _begin_expand(self) -> None:
@@ -994,13 +1028,21 @@ def _process_one_segment(
         print(
             f"[{stem}] seg={seg['index']} x265 params: feature-derived "
             f"(aq-mode={seg_base_params.get('aq-mode')}, "
-            f"ref={seg_base_params.get('ref')}, bframes={seg_base_params.get('bframes')})",
+            f"ref={seg_base_params.get('ref')}, bframes={seg_base_params.get('bframes')}, "
+            f"keyint={seg_base_params.get('keyint')}, scenecut={seg_base_params.get('scenecut')})",
             flush=True,
         )
     elif use_feature_params and param_src == "fixed_fallback":
         print(
             f"[{stem}] seg={seg['index']} x265 params: fixed fallback "
-            f"(no segment features in {features_dir.name})",
+            f"(no segment features in {features_dir.name}; "
+            f"keyint={seg_base_params.get('keyint')}, scenecut={seg_base_params.get('scenecut')})",
+            flush=True,
+        )
+    else:
+        print(
+            f"[{stem}] seg={seg['index']} x265 params: fixed "
+            f"(keyint={seg_base_params.get('keyint')}, scenecut={seg_base_params.get('scenecut')})",
             flush=True,
         )
 
@@ -1420,6 +1462,7 @@ def main() -> int:
         f"segments_parallel={segment_workers}"
     )
     print(f"preset     : {args.preset}")
+    print("GOP        : scene-as-one (keyint=min-keyint=frame_count, scenecut=0)")
     if use_feature_params:
         print(f"x265 params: per-segment from {features_dir}")
     else:
